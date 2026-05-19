@@ -1,0 +1,52 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Data / outputs
+2024/
+data/
+logs/
+joblog/
+shap_analysis/
+analysis_results/
+archives/
+reports/
+features/
+encoded_test_npz/
+encoded_train_npz/
+encoded_*
+*.mmap
+*.npy
+*.npz
+
+# Large or generated reference data
+reference/mitre/enterprise-attack.json
+reference/mitre/attack.sqlite
+reference/mitre/attack.sqlite-*
+
+# Logs / misc outputs
+*.out
+*.err
+slurm-*.out
+slurm-*.err
+
+# Project-specific generated files
+rf_models.pkl
+label_accuracy_log_RF.txt
+test_results_2017.txt
+teapot_optimization_demo.gif
+
+# Optional folders not part of program body
+kouhai_reserch/
+huyou/
+tree_visualization/
+logs_api_frequency/
+logs_keyword/
+
+# Root data dumps
+api*.json
+label_set.json
+labels.json
+filtered_indexes_*.txt

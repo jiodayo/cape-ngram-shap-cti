@@ -1,0 +1,27 @@
+pattern,technique_id,confidence,rationale
+createremotethread(ex)?,T1055,high,Remote thread creation often indicates process injection
+writeprocessmemory,T1055,high,WriteProcessMemory is used for process injection
+virtualallocex,T1055,medium,Remote allocation used in injection
+ntcreatesection|ntmapviewofsection|ntunmapviewofsection,T1055,medium,Section mapping is common in process injection
+setthreadcontext,T1055,medium,Context manipulation used in injection or hollowing
+queueuserapc,T1055,medium,APC injection patterns
+reg(create|set|delete)key|reg(set|delete)value|ntsetvaluekey|ntdeletekey,T1112,medium,Registry modification
+reg(query|open)key|ntopenkey|ntqueryvaluekey,T1012,low,Registry discovery
+bitblt|printwindow|getdc,T1113,medium,Screen capture APIs
+getasynckeystate|getkeystate|setwindowshookex,T1056.001,medium,Keylogging APIs
+ntwritevirtualmemory|rtlwriteprocessmemory,T1055,medium,Remote memory writes used in injection
+rtlcreateuserthread|ntcreatethreadex,T1055,medium,Remote thread creation variants
+ntqueueapcthread,T1055,medium,APC injection via native API
+createtoolhelp32snapshot|process32first|process32next|enumprocesses|ntquerysysteminformation,T1057,medium,Process discovery APIs
+enumservicesstatusex|enumservicesstatus|queryservicestatus|queryservicestatusex,T1007,medium,Service discovery APIs
+createservice|startservice|controlservice|deleteservice,T1543.003,medium,Service creation or control for persistence
+getsysteminfo|getnativesysteminfo|getversionex|rtlgetversion|getsystemmetrics,T1082,low,System information discovery
+getcomputername|gethostname|getusername|getusernameex|lookupaccountname|netuserenum|netusergetinfo|lsaenumaccounts,T1087,low,Account discovery
+getadaptersinfo|getadaptersaddresses|getipaddrtable|getnetworkparams,T1016,low,Network configuration discovery
+dnsquery|dnsquery_a|dnsquery_w|getaddrinfo,T1071.004,low,DNS lookups may indicate DNS-based C2
+internetopen|internetconnect|httpopenrequest|httpsendrequest|winhttpopen|winhttpconnect|winhttpsendrequest|winhttpreaddata,T1071.001,medium,HTTP(S) communications via WinINet/WinHTTP
+urldownloadtofile|urldownloadtocachefile,T1105,medium,Inbound transfer via URL download APIs
+openclipboard|getclipboarddata|setclipboarddata,T1115,medium,Clipboard access APIs
+minidumpwritedump,T1003.001,low,Process memory dumps can target LSASS
+cryptunprotectdata|cryptprotectdata|credread|credenumerate|credwrite,T1555.004,low,Credential Manager/DPAPI access
+getlocaltime|getsystemtime|gettickcount|queryperformancecounter,T1124,low,System time discovery APIs
