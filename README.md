@@ -179,6 +179,56 @@ python3 src/train_api_frequency_rf.py
 
 ---
 
+## 🔗 CTI連携・XAI パイプライン
+
+```
+モデル学習完了後:
+
+1. SHAP寄与度分析（グループ別）
+   python3 src/analyze_shap_ngram_desc_lgbm_group.py
+   → shap_analysis/.../shap_group_contributions.csv
+   → shap_analysis/.../shap_top_features.csv
+
+2. per-sample SHAP出力
+   python3 src/export_shap_ngram_desc_lgbm_per_sample.py
+   → shap_analysis/.../per_sample/shap_per_sample_topk_{label}.csv
+
+3. ATT&CK技術マッピング（confidence重み付き）
+   python3 src/cti_attach_shap_explanations.py --use-confidence-weight
+   → shap_analysis/.../cti/cti_results.sqlite
+
+4. スライド用可視化3点セット
+   python3 src/visualize_shap_slide_set.py
+   → figures/slide_set/{label}/summary_bar.png
+   → figures/slide_set/{label}/group_donut.png
+   → figures/slide_set/{label}/representative_waterfall.png
+
+5. 説明品質評価
+   python3 src/evaluate_explanation_quality.py
+   → evaluation/explanation_quality.json
+```
+
+### ツール一覧
+
+| スクリプト | 用途 |
+|-----------|------|
+| `src/common.py` | 共通関数モジュール（全スクリプトが依存） |
+| `src/cti_validate_rules.py` | ATT&CKルールの検証・カバレッジ確認 |
+| `src/visualize_shap_slide_set.py` | スライド用SHAP可視化3点セット生成 |
+| `src/query_shap_db.py` | SQLiteからの検体・技術検索CLI |
+| `src/evaluate_explanation_quality.py` | 説明品質の定量評価 |
+
+### 設定ファイル
+
+| ファイル | 用途 |
+|---------|------|
+| `config/default_paths.json` | デフォルトパス設定（全スクリプト共通） |
+| `reference/mitre/api_to_attack_rules.csv` | API→ATT&CK技術マッピングルール（98ルール） |
+| `reference/mitre/explanation_templates.json` | 技術IDごとの自然言語説明テンプレート（31技術） |
+| `requirements.txt` | Python依存パッケージ |
+
+---
+
 ## 📝 重要な設定ファイル
 
 | ファイル | 用途 |

@@ -1,0 +1,11 @@
+{
+  "data_root": "data/avast_ctu_cape/ngram_dataset_family_104",
+  "feature_root": "logs/cape_ngram_desc_full_lgbm_seed42_latest",
+  "model_dir": "{feature_root}/lgbm/models",
+  "shap_output": "shap_analysis/ngram_desc_lgbm_group_latest",
+  "shap_per_sample_dir": "shap_analysis/ngram_desc_lgbm_group_latest/per_sample",
+  "attack_db": "reference/mitre/attack.sqlite",
+  "rules": "reference/mitre/api_to_attack_rules.csv",
+  "explanation_templates": "reference/mitre/explanation_templates.json",
+  "figures_dir": "figures"
+}

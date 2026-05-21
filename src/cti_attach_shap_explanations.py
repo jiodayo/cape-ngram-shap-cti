@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Attach ATT&CK technique hints to per-sample SHAP results."""
+"""Attach ATT&CK technique hints to per-sample SHAP results.
+
+Supports confidence-weighted scoring and template-based explanations.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +12,7 @@ import json
 import re
 import sqlite3
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 
 def parse_args() -> argparse.Namespace:
@@ -33,6 +36,12 @@ def parse_args() -> argparse.Namespace:
         default=Path("reference/mitre/api_to_attack_rules.csv"),
     )
     parser.add_argument(
+        "--templates",
+        type=Path,
+        default=Path("reference/mitre/explanation_templates.json"),
+        help="Optional JSON with technique_id -> explanation templates.",
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         default=Path("shap_analysis/ngram_desc_lgbm_group_nometa_106/cti"),
@@ -44,6 +53,18 @@ def parse_args() -> argparse.Namespace:
             "shap_analysis/ngram_desc_lgbm_group_nometa_106/cti/cti_results.sqlite"),
     )
     parser.add_argument("--top-techniques", type=int, default=3)
+    parser.add_argument(
+        "--min-confidence",
+        type=float,
+        default=0.0,
+        help="Minimum confidence_score to include a rule match (0.0-1.0).",
+    )
+    parser.add_argument(
+        "--use-confidence-weight",
+        action="store_true",
+        default=True,
+        help="Weight technique scores by confidence_score.",
+    )
     return parser.parse_args()
 
 
@@ -67,28 +88,49 @@ def load_attack_db(path: Path) -> Tuple[Dict[str, str], Dict[str, List[str]]]:
     return techniques, tactics
 
 
-def load_rules(path: Path) -> List[Dict[str, object]]:
+def load_rules(path: Path, min_confidence: float = 0.0) -> List[Dict[str, object]]:
     rules: List[Dict[str, object]] = []
     with path.open("r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
             pattern = (row.get("pattern") or "").strip()
             technique_id = (row.get("technique_id") or "").strip()
-            if not pattern or not technique_id:
+            if not pattern or not technique_id or pattern.startswith("#"):
                 continue
+
+            # Parse confidence_score (new column, default 0.5)
+            try:
+                confidence_score = float(row.get("confidence_score") or "0.5")
+            except (ValueError, TypeError):
+                confidence_score = 0.5
+
+            if confidence_score < min_confidence:
+                continue
+
             try:
                 regex = re.compile(pattern, re.IGNORECASE)
             except re.error:
                 continue
+
             rules.append(
                 {
                     "regex": regex,
                     "technique_id": technique_id,
                     "confidence": (row.get("confidence") or "").strip(),
+                    "confidence_score": confidence_score,
+                    "category": (row.get("category") or "").strip(),
                     "rationale": (row.get("rationale") or "").strip(),
                 }
             )
     return rules
+
+
+def load_templates(path: Path) -> Dict[str, Dict[str, str]]:
+    """Load explanation templates if available."""
+    if not path.exists():
+        return {}
+    with path.open("r", encoding="utf-8") as f:
+        return json.load(f)
 
 
 def extract_tokens(feature: str) -> List[str]:
@@ -105,16 +147,63 @@ def extract_tokens(feature: str) -> List[str]:
     return [feature]
 
 
-def map_feature(feature: str, rules: Sequence[Dict[str, object]]) -> List[str]:
+def map_feature(
+    feature: str,
+    rules: Sequence[Dict[str, object]],
+) -> List[Tuple[str, float, str]]:
+    """Map a feature to ATT&CK techniques.
+
+    Returns list of (technique_id, confidence_score, category) tuples.
+    """
     tokens = extract_tokens(feature)
-    matched: List[str] = []
+    matched: List[Tuple[str, float, str]] = []
     for rule in rules:
         regex = rule["regex"]
         for token in tokens + [feature]:
             if regex.search(token):
-                matched.append(str(rule["technique_id"]))
+                matched.append((
+                    str(rule["technique_id"]),
+                    float(rule["confidence_score"]),
+                    str(rule.get("category", "")),
+                ))
                 break
     return matched
+
+
+def build_explanation(
+    top_ids: List[str],
+    top_scores: List[float],
+    techniques: Dict[str, str],
+    tactics: Dict[str, List[str]],
+    templates: Dict[str, Dict[str, str]],
+    matched_apis: Dict[str, List[str]],
+) -> str:
+    """Build a natural language explanation from matched techniques."""
+    if not top_ids:
+        return "ATT&CKマッピングに一致する特徴量はありませんでした。"
+
+    parts: List[str] = []
+    for tid, score in zip(top_ids, top_scores):
+        tech_name = techniques.get(tid, tid)
+        tactic_list = tactics.get(tid, [])
+        tactic_str = ", ".join(tactic_list) if tactic_list else "不明"
+
+        # Use template if available
+        template = templates.get(tid, {})
+        if template and "summary" in template:
+            summary = template["summary"]
+            # Interpolate matched APIs if available
+            apis = matched_apis.get(tid, [])
+            api_str = ", ".join(apis[:5]) if apis else "N/A"
+            summary = summary.replace("{matched_apis}", api_str)
+            summary = summary.replace("{tactic}", tactic_str)
+            parts.append(f"{tid} {tech_name} (スコア:{score:.3f}): {summary}")
+        else:
+            parts.append(
+                f"{tid} {tech_name} (スコア:{score:.3f}, 戦術:{tactic_str})"
+            )
+
+    return "検出された技術: " + "; ".join(parts)
 
 
 def ensure_output_db(path: Path) -> sqlite3.Connection:
@@ -134,6 +223,37 @@ def ensure_output_db(path: Path) -> sqlite3.Connection:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sample_techniques (
+            sample TEXT,
+            label TEXT,
+            technique_id TEXT,
+            technique_name TEXT,
+            score REAL,
+            confidence_score REAL,
+            category TEXT,
+            tactics TEXT,
+            PRIMARY KEY (sample, label, technique_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sample_features (
+            sample TEXT,
+            label TEXT,
+            rank INTEGER,
+            feature TEXT,
+            abs_shap REAL,
+            technique_ids TEXT,
+            PRIMARY KEY (sample, label, rank)
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_st_sample ON sample_techniques(sample)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_st_technique ON sample_techniques(technique_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sf_sample ON sample_features(sample)")
     conn.commit()
     return conn
 
@@ -144,9 +264,14 @@ def write_sample_row(
     sample: str,
     label: str,
     top_features: List[str],
+    feature_shap_values: Dict[str, float],
     technique_scores: Dict[str, float],
+    technique_confidences: Dict[str, float],
+    technique_categories: Dict[str, str],
+    technique_matched_apis: Dict[str, List[str]],
     techniques: Dict[str, str],
     tactics: Dict[str, List[str]],
+    templates: Dict[str, Dict[str, str]],
     top_n: int,
 ) -> None:
     if technique_scores:
@@ -157,15 +282,14 @@ def write_sample_row(
         sorted_tech = []
 
     top_ids = [tid for tid, _ in sorted_tech[:top_n]]
+    top_score_values = [score for _, score in sorted_tech[:top_n]]
     top_names = [techniques.get(tid, "") for tid in top_ids]
-    top_scores = [f"{tid}:{score:.4f}" for tid, score in sorted_tech[:top_n]]
+    top_scores_str = [f"{tid}:{score:.4f}" for tid, score in sorted_tech[:top_n]]
     top_tactics = [";".join(tactics.get(tid, [])) for tid in top_ids]
 
-    if top_ids:
-        pairs = [f"{tid} {techniques.get(tid, '')}" for tid in top_ids]
-        explanation = "Mapped techniques: " + "; ".join(pairs)
-    else:
-        explanation = "No ATT&CK mapping matched."
+    explanation = build_explanation(
+        top_ids, top_score_values, techniques, tactics, templates, technique_matched_apis
+    )
 
     row = [
         sample,
@@ -173,23 +297,60 @@ def write_sample_row(
         "|".join(top_features),
         "|".join(top_ids),
         "|".join(top_names),
-        "|".join(top_scores),
+        "|".join(top_scores_str),
         "|".join(top_tactics),
         explanation,
     ]
     writer.writerow(row)
 
     conn.execute(
-        "INSERT INTO sample_summary VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT OR REPLACE INTO sample_summary VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         row,
     )
+
+    # Normalized technique rows
+    for tid, score in sorted_tech:
+        conn.execute(
+            "INSERT OR REPLACE INTO sample_techniques VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                sample,
+                label,
+                tid,
+                techniques.get(tid, ""),
+                score,
+                technique_confidences.get(tid, 0.5),
+                technique_categories.get(tid, ""),
+                ";".join(tactics.get(tid, [])),
+            ),
+        )
+
+    # Feature rows
+    for rank, feature in enumerate(top_features, start=1):
+        feat_techniques = []
+        tokens = extract_tokens(feature)
+        # Simple re-match for feature-level technique tracking
+        conn.execute(
+            "INSERT OR REPLACE INTO sample_features VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                sample,
+                label,
+                rank,
+                feature,
+                feature_shap_values.get(feature, 0.0),
+                "",  # technique_ids populated at query time via JOINs
+            ),
+        )
 
 
 def main() -> None:
     args = parse_args()
 
     techniques, tactics = load_attack_db(args.attack_db)
-    rules = load_rules(args.rules)
+    rules = load_rules(args.rules, min_confidence=args.min_confidence)
+    templates = load_templates(args.templates)
+
+    print(f"[INFO] Loaded {len(rules)} rules (min_confidence={args.min_confidence})")
+    print(f"[INFO] Loaded {len(templates)} explanation templates")
 
     output_dir = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -222,9 +383,11 @@ def main() -> None:
             current_sample: Optional[str] = None
             current_label: Optional[str] = None
             current_features: List[Tuple[int, str]] = []
-            current_scores: Dict[str, float] = {}
+            current_feature_shap: Dict[str, float] = {}
             current_techniques: Dict[str, float] = {}
-            current_seen_tech: set[str] = set()
+            current_confidences: Dict[str, float] = {}
+            current_categories: Dict[str, str] = {}
+            current_matched_apis: Dict[str, List[str]] = {}
 
             def flush() -> None:
                 if current_sample is None or current_label is None:
@@ -236,9 +399,14 @@ def main() -> None:
                     current_sample,
                     current_label,
                     top_features,
+                    current_feature_shap,
                     current_techniques,
+                    current_confidences,
+                    current_categories,
+                    current_matched_apis,
                     techniques,
                     tactics,
+                    templates,
                     args.top_techniques,
                 )
 
@@ -268,18 +436,33 @@ def main() -> None:
                     current_sample = sample
                     current_label = row_label
                     current_features = []
-                    current_scores = {}
+                    current_feature_shap = {}
                     current_techniques = {}
-                    current_seen_tech = set()
+                    current_confidences = {}
+                    current_categories = {}
+                    current_matched_apis = {}
 
                 current_features.append((rank, feature))
+                current_feature_shap[feature] = abs_shap
+
                 matches = map_feature(feature, rules)
-                for tid in matches:
-                    current_techniques[tid] = current_techniques.get(
-                        tid, 0.0) + abs_shap
-                    current_scores[tid] = current_scores.get(
-                        tid, 0.0) + abs_shap
-                    current_seen_tech.add(tid)
+                for tid, conf_score, category in matches:
+                    # Confidence-weighted scoring
+                    if args.use_confidence_weight:
+                        weighted = abs_shap * conf_score
+                    else:
+                        weighted = abs_shap
+
+                    current_techniques[tid] = current_techniques.get(tid, 0.0) + weighted
+                    current_confidences[tid] = max(
+                        current_confidences.get(tid, 0.0), conf_score
+                    )
+                    if category:
+                        current_categories[tid] = category
+
+                    # Track matched API tokens for explanations
+                    tokens = extract_tokens(feature)
+                    current_matched_apis.setdefault(tid, []).extend(tokens)
 
             flush()
 
@@ -320,8 +503,12 @@ def main() -> None:
             {
                 "rules": str(args.rules),
                 "attack_db": str(args.attack_db),
+                "templates": str(args.templates),
                 "top_techniques": args.top_techniques,
-                "note": "Heuristic mapping from API patterns to ATT&CK techniques.",
+                "min_confidence": args.min_confidence,
+                "use_confidence_weight": args.use_confidence_weight,
+                "num_rules_loaded": len(rules),
+                "num_templates_loaded": len(templates),
             },
             f,
             indent=2,

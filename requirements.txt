@@ -1,0 +1,21 @@
+# Core dependencies
+numpy>=1.24
+scipy>=1.10
+scikit-learn>=1.3
+joblib>=1.3
+tqdm>=4.60
+
+# Models
+lightgbm>=4.0
+
+# SHAP analysis
+shap>=0.42
+
+# Visualization
+matplotlib>=3.7
+
+# Data handling
+pandas>=2.0
+
+# Optional: Description embeddings
+# sentence-transformers>=2.2

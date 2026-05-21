@@ -1,27 +1,127 @@
-pattern,technique_id,confidence,rationale
-createremotethread(ex)?,T1055,high,Remote thread creation often indicates process injection
-writeprocessmemory,T1055,high,WriteProcessMemory is used for process injection
-virtualallocex,T1055,medium,Remote allocation used in injection
-ntcreatesection|ntmapviewofsection|ntunmapviewofsection,T1055,medium,Section mapping is common in process injection
-setthreadcontext,T1055,medium,Context manipulation used in injection or hollowing
-queueuserapc,T1055,medium,APC injection patterns
-reg(create|set|delete)key|reg(set|delete)value|ntsetvaluekey|ntdeletekey,T1112,medium,Registry modification
-reg(query|open)key|ntopenkey|ntqueryvaluekey,T1012,low,Registry discovery
-bitblt|printwindow|getdc,T1113,medium,Screen capture APIs
-getasynckeystate|getkeystate|setwindowshookex,T1056.001,medium,Keylogging APIs
-ntwritevirtualmemory|rtlwriteprocessmemory,T1055,medium,Remote memory writes used in injection
-rtlcreateuserthread|ntcreatethreadex,T1055,medium,Remote thread creation variants
-ntqueueapcthread,T1055,medium,APC injection via native API
-createtoolhelp32snapshot|process32first|process32next|enumprocesses|ntquerysysteminformation,T1057,medium,Process discovery APIs
-enumservicesstatusex|enumservicesstatus|queryservicestatus|queryservicestatusex,T1007,medium,Service discovery APIs
-createservice|startservice|controlservice|deleteservice,T1543.003,medium,Service creation or control for persistence
-getsysteminfo|getnativesysteminfo|getversionex|rtlgetversion|getsystemmetrics,T1082,low,System information discovery
-getcomputername|gethostname|getusername|getusernameex|lookupaccountname|netuserenum|netusergetinfo|lsaenumaccounts,T1087,low,Account discovery
-getadaptersinfo|getadaptersaddresses|getipaddrtable|getnetworkparams,T1016,low,Network configuration discovery
-dnsquery|dnsquery_a|dnsquery_w|getaddrinfo,T1071.004,low,DNS lookups may indicate DNS-based C2
-internetopen|internetconnect|httpopenrequest|httpsendrequest|winhttpopen|winhttpconnect|winhttpsendrequest|winhttpreaddata,T1071.001,medium,HTTP(S) communications via WinINet/WinHTTP
-urldownloadtofile|urldownloadtocachefile,T1105,medium,Inbound transfer via URL download APIs
-openclipboard|getclipboarddata|setclipboarddata,T1115,medium,Clipboard access APIs
-minidumpwritedump,T1003.001,low,Process memory dumps can target LSASS
-cryptunprotectdata|cryptprotectdata|credread|credenumerate|credwrite,T1555.004,low,Credential Manager/DPAPI access
-getlocaltime|getsystemtime|gettickcount|queryperformancecounter,T1124,low,System time discovery APIs
+pattern,technique_id,confidence,confidence_score,category,rationale
+# ===== Process Injection (T1055) =====
+createremotethread(ex)?,T1055,high,0.95,injection,Remote thread creation often indicates process injection
+writeprocessmemory,T1055,high,0.95,injection,WriteProcessMemory is used for process injection
+virtualallocex,T1055,medium,0.70,injection,Remote allocation used in injection
+ntcreatesection|ntmapviewofsection|ntunmapviewofsection,T1055,medium,0.65,injection,Section mapping is common in process injection
+setthreadcontext,T1055,medium,0.70,injection,Context manipulation used in injection or hollowing
+queueuserapc,T1055,medium,0.70,injection,APC injection patterns
+ntwritevirtualmemory|rtlwriteprocessmemory,T1055,medium,0.70,injection,Remote memory writes used in injection
+rtlcreateuserthread|ntcreatethreadex,T1055,medium,0.70,injection,Remote thread creation variants
+ntqueueapcthread,T1055,medium,0.70,injection,APC injection via native API
+ntallocatevirtualmemory,T1055,low,0.40,injection,Virtual memory allocation (often benign but used in injection chains)
+ntprotectvirtualmemory,T1055,medium,0.55,injection,Memory protection change can indicate injection preparation
+ntresumethread,T1055,low,0.35,injection,Thread resume after injection setup
+ntwritefile,T1055,low,0.25,injection,Generic file write (low specificity for injection)
+# ===== Process Hollowing (T1055.012) =====
+ntunmapviewofsection.*ntmapviewofsection,T1055.012,high,0.85,injection,Unmap+remap pattern is classic process hollowing
+zwunmapviewofsection,T1055.012,medium,0.65,injection,Zw variant of section unmapping used in hollowing
+# ===== Registry Modification (T1112) =====
+reg(create|set|delete)key|reg(set|delete)value|ntsetvaluekey|ntdeletekey,T1112,medium,0.60,persistence,Registry modification
+regsetvalue(ex)?(a|w)?,T1112,medium,0.65,persistence,Registry value setting
+ntsetvaluekey,T1112,medium,0.60,persistence,Native API registry value modification
+ntdeletevaluekey,T1112,medium,0.60,persistence,Native API registry value deletion
+# ===== Registry Discovery (T1012) =====
+reg(query|open)key|ntopenkey|ntqueryvaluekey,T1012,low,0.30,discovery,Registry discovery
+regopenkey(ex)?(a|w)?,T1012,low,0.30,discovery,Registry key opening for reading
+ntquerykey,T1012,low,0.25,discovery,Native API registry key query
+ntenumeratekey,T1012,low,0.30,discovery,Registry key enumeration
+ntenumeratevaluekey,T1012,low,0.30,discovery,Registry value enumeration
+# ===== Screen Capture (T1113) =====
+bitblt|printwindow|getdc,T1113,medium,0.65,collection,Screen capture APIs
+getwindowdc,T1113,medium,0.60,collection,Window device context for screen capture
+createdibsection,T1113,low,0.35,collection,DIB section creation (used in some capture methods)
+# ===== Keylogging (T1056.001) =====
+getasynckeystate|getkeystate|setwindowshookex,T1056.001,medium,0.65,collection,Keylogging APIs
+getrawintputdata,T1056.001,medium,0.60,collection,Raw input data access for keylogging
+registerrawinputdevices,T1056.001,medium,0.55,collection,Raw input device registration
+# ===== Process Discovery (T1057) =====
+createtoolhelp32snapshot|process32first|process32next|enumprocesses|ntquerysysteminformation,T1057,medium,0.50,discovery,Process discovery APIs
+openprocess,T1057,low,0.30,discovery,Opening process handle (often precedes injection or discovery)
+ntqueryinformationprocess,T1057,low,0.35,discovery,Native API process information query
+# ===== Service Discovery (T1007) =====
+enumservicesstatusex|enumservicesstatus|queryservicestatus|queryservicestatusex,T1007,medium,0.55,discovery,Service discovery APIs
+openscmanager(a|w)?,T1007,low,0.30,discovery,Service Control Manager access
+openservice(a|w)?,T1007,low,0.30,discovery,Opening service handles
+# ===== Service Persistence (T1543.003) =====
+createservice|startservice|controlservice|deleteservice,T1543.003,medium,0.65,persistence,Service creation or control for persistence
+changeserviceconfig(2)?(a|w)?,T1543.003,medium,0.60,persistence,Service configuration modification
+# ===== System Info Discovery (T1082) =====
+getsysteminfo|getnativesysteminfo|getversionex|rtlgetversion|getsystemmetrics,T1082,low,0.25,discovery,System information discovery
+getcomputername(ex)?(a|w)?,T1082,low,0.25,discovery,Computer name retrieval
+globalmemorystatus(ex)?,T1082,low,0.20,discovery,Memory status query
+getdiskfreespace(ex)?(a|w)?,T1082,low,0.20,discovery,Disk space query
+# ===== Account Discovery (T1087) =====
+getusername(ex)?(a|w)?|lookupaccountname|netuserenum|netusergetinfo|lsaenumaccounts,T1087,low,0.30,discovery,Account discovery
+lookupaccountsid(a|w)?,T1087,low,0.25,discovery,SID to account name lookup
+gettokeninformation,T1087,low,0.25,discovery,Token information retrieval
+# ===== Network Config Discovery (T1016) =====
+getadaptersinfo|getadaptersaddresses|getipaddrtable|getnetworkparams,T1016,low,0.30,discovery,Network configuration discovery
+gethostbyname,T1016,low,0.25,discovery,Host name resolution
+wsastartup,T1016,low,0.15,discovery,WinSock initialization (very common)
+# ===== DNS-based C2 (T1071.004) =====
+dnsquery|dnsquery_a|dnsquery_w|getaddrinfo,T1071.004,low,0.35,c2,DNS lookups may indicate DNS-based C2
+gethostbyname(a|w)?,T1071.004,low,0.25,c2,Host resolution (common but may indicate C2)
+# ===== HTTP(S) C2 (T1071.001) =====
+internetopen|internetconnect|httpopenrequest|httpsendrequest,T1071.001,medium,0.60,c2,HTTP communications via WinINet
+winhttpopen|winhttpconnect|winhttpsendrequest|winhttpreaddata,T1071.001,medium,0.60,c2,HTTP communications via WinHTTP
+internetreadfile,T1071.001,medium,0.55,c2,Reading HTTP response data
+httpqueryinfo(a|w)?,T1071.001,low,0.35,c2,HTTP response header query
+internetcrackurl(a|w)?,T1071.001,low,0.30,c2,URL parsing (may precede C2 connection)
+# ===== Inbound Transfer (T1105) =====
+urldownloadtofile|urldownloadtocachefile,T1105,medium,0.70,c2,Inbound transfer via URL download APIs
+internetreadfile,T1105,medium,0.50,c2,Reading downloaded content
+# ===== Clipboard (T1115) =====
+openclipboard|getclipboarddata|setclipboarddata,T1115,medium,0.60,collection,Clipboard access APIs
+# ===== Credential Dumping (T1003.001) =====
+minidumpwritedump,T1003.001,medium,0.60,credential_access,Process memory dumps can target LSASS
+# ===== Credential Access (T1555.004) =====
+cryptunprotectdata|cryptprotectdata|credread|credenumerate|credwrite,T1555.004,low,0.35,credential_access,Credential Manager/DPAPI access
+# ===== Time Discovery (T1124) =====
+getlocaltime|getsystemtime|gettickcount|queryperformancecounter,T1124,low,0.15,discovery,System time discovery APIs (very common)
+getsystemtimeasfiletime,T1124,low,0.10,discovery,File time retrieval (extremely common in benign software)
+# ===== File Deletion / Indicator Removal (T1070.004) =====
+deletefile(a|w)?,T1070.004,low,0.30,defense_evasion,File deletion may indicate trace cleanup
+ntdeletefile,T1070.004,low,0.30,defense_evasion,Native API file deletion
+removedirectory(a|w)?,T1070.004,low,0.20,defense_evasion,Directory removal
+# ===== File/Directory Discovery (T1083) =====
+findfirstfile(ex)?(a|w)?|findnextfile(a|w)?,T1083,low,0.25,discovery,File and directory enumeration
+getfileattributes(ex)?(a|w)?,T1083,low,0.20,discovery,File attribute query
+# ===== Obfuscated Files (T1027) =====
+cryptdecrypt|cryptencrypt,T1027,low,0.35,defense_evasion,Cryptographic operations may indicate payload decryption
+bcryptdecrypt|bcryptencrypt,T1027,low,0.35,defense_evasion,BCrypt operations may indicate payload decryption
+# ===== Dynamic Resolution (T1106) =====
+getprocaddress|getmodulehandle(a|w)?,T1106,low,0.30,execution,Dynamic API resolution (common but used in evasion)
+loadlibrary(ex)?(a|w)?,T1106,low,0.25,execution,Dynamic library loading
+ldrloaddll|ldrgetprocedureaddress,T1106,medium,0.45,execution,Native API dynamic resolution (more suspicious)
+# ===== Thread Execution Hijacking (T1055.003) =====
+suspendthread|ntsetcontextthread,T1055.003,medium,0.65,injection,Thread suspension + context set indicates hijacking
+# ===== Process Creation (T1059) =====
+createprocess(internal)?(a|w)?,T1059,medium,0.45,execution,Process creation
+shellexecute(ex)?(a|w)?,T1059,medium,0.50,execution,Shell execution of commands or files
+ntcreateuserprocess,T1059,medium,0.50,execution,Native API process creation
+# ===== Scheduled Task (T1053.005) =====
+cocreateinstance.*taskscheduler,T1053.005,medium,0.60,persistence,Task Scheduler COM interface usage
+# ===== Boot/Logon Autostart (T1547.001) =====
+regsetvalue.*(run|runonce),T1547.001,high,0.80,persistence,Registry Run key modification for persistence
+# ===== Disable Security Tools (T1562.001) =====
+adjusttokenprivileges,T1562.001,low,0.30,defense_evasion,Token privilege adjustment
+ntadjustprivilegestoken,T1562.001,low,0.30,defense_evasion,Native API privilege adjustment
+# ===== Masquerading (T1036) =====
+movefileex(a|w)?|movefile(a|w)?,T1036,low,0.25,defense_evasion,File move/rename may indicate masquerading
+copyfile(ex)?(a|w)?,T1036,low,0.20,defense_evasion,File copy may indicate dropper behavior
+# ===== Access Token Manipulation (T1134) =====
+openprocesstoken|openthreadtoken,T1134,medium,0.45,privilege_escalation,Token access for privilege manipulation
+duplicatetoken(ex)?,T1134,medium,0.55,privilege_escalation,Token duplication for impersonation
+impersonateloggedonuser,T1134,medium,0.60,privilege_escalation,User impersonation
+# ===== Shared Module (T1129) =====
+ntmapviewofsection,T1129,low,0.20,execution,Section mapping for shared module loading
+# ===== Input Capture (T1056) =====
+getmessage(a|w)?|peekmessage(a|w)?,T1056,low,0.15,collection,Message loop (very common in GUI apps)
+# ===== Virtualization/Sandbox Evasion (T1497) =====
+isdebuggerpresent|checkremotedebuggerpresent|ntqueryinformationprocess.*debugport,T1497,high,0.80,defense_evasion,Anti-debug/anti-sandbox detection
+outputdebugstring(a|w)?,T1497,low,0.30,defense_evasion,Debug string output (may be anti-analysis)
+ntdelayexecution|sleep,T1497,low,0.20,defense_evasion,Sleep calls may indicate sandbox evasion timing
+# ===== Socket Communication (T1095) =====
+socket|connect|send|recv|bind|listen|accept,T1095,low,0.30,c2,Raw socket operations for non-application C2
+wsasend|wsarecv|wsasocket(a|w)?,T1095,low,0.30,c2,WSA socket operations
