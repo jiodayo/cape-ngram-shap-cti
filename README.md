@@ -206,6 +206,10 @@ python3 src/train_api_frequency_rf.py
 5. 説明品質評価
    python3 src/evaluate_explanation_quality.py
    → evaluation/explanation_quality.json
+
+6. HTMLレポート生成（全結果を統合）
+   python3 src/generate_html_report.py
+   → reports/shap_cti_report.html
 ```
 
 ### ツール一覧
@@ -217,6 +221,7 @@ python3 src/train_api_frequency_rf.py
 | `src/visualize_shap_slide_set.py` | スライド用SHAP可視化3点セット生成 |
 | `src/query_shap_db.py` | SQLiteからの検体・技術検索CLI |
 | `src/evaluate_explanation_quality.py` | 説明品質の定量評価 |
+| `src/generate_html_report.py` | 全結果を統合したHTMLレポート生成 |
 
 ### 設定ファイル
 
