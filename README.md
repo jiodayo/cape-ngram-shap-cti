@@ -237,6 +237,7 @@ python3 src/train_api_frequency_rf.py
 | `src/generate_api_descriptions.py` | Windows API説明文の自動生成（desc特徴量の品質向上） |
 | `src/cti_advanced_analysis.py` | CTI深層分析（共起・攻撃チェーン・Navigator・脅威プロファイル） |
 | `src/visualize_cti_analysis.py` | CTI分析結果の可視化（共起ヒートマップ・脅威レベル分布等） |
+| `src/leaderboard.py` | 実験リーダーボード（登録・比較・HTMLランキング生成） |
 
 ### 設定ファイル
 
