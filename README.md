@@ -222,6 +222,8 @@ python3 src/train_api_frequency_rf.py
 | `src/query_shap_db.py` | SQLiteからの検体・技術検索CLI |
 | `src/evaluate_explanation_quality.py` | 説明品質の定量評価 |
 | `src/generate_html_report.py` | 全結果を統合したHTMLレポート生成 |
+| `src/visualize_shap_cti_integrated.py` | SHAP+CTI統合可視化（ヒートマップ・キルチェーン・レーダー） |
+| `src/generate_api_descriptions.py` | Windows API説明文の自動生成（desc特徴量の品質向上） |
 
 ### 設定ファイル
 
