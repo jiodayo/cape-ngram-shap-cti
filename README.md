@@ -210,6 +210,17 @@ python3 src/train_api_frequency_rf.py
 6. HTMLレポート生成（全結果を統合）
    python3 src/generate_html_report.py
    → reports/shap_cti_report.html
+
+7. CTI深層分析（共起・攻撃チェーン・Navigatorレイヤー）
+   python3 src/cti_advanced_analysis.py
+   → reports/cti_analysis/attack_chains.json
+   → reports/cti_analysis/navigator_layers/layer_{label}.json
+   → reports/cti_analysis/threat_profiles.json
+
+8. CTI分析可視化
+   python3 src/visualize_cti_analysis.py
+   → figures/cti_analysis/cooccurrence_heatmap.png
+   → figures/cti_analysis/threat_level_distribution.png
 ```
 
 ### ツール一覧
@@ -224,6 +235,8 @@ python3 src/train_api_frequency_rf.py
 | `src/generate_html_report.py` | 全結果を統合したHTMLレポート生成 |
 | `src/visualize_shap_cti_integrated.py` | SHAP+CTI統合可視化（ヒートマップ・キルチェーン・レーダー） |
 | `src/generate_api_descriptions.py` | Windows API説明文の自動生成（desc特徴量の品質向上） |
+| `src/cti_advanced_analysis.py` | CTI深層分析（共起・攻撃チェーン・Navigator・脅威プロファイル） |
+| `src/visualize_cti_analysis.py` | CTI分析結果の可視化（共起ヒートマップ・脅威レベル分布等） |
 
 ### 設定ファイル
 
