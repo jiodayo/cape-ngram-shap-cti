@@ -73,17 +73,36 @@ def prepare_features_and_labels(npz_dir, json_dir, max_sentences, features_memma
         features_memmap = np.memmap(
             features_memmap_path, dtype='float32', mode='w+', shape=(num_samples, flattened_dim))
 
+    # JSONファイルのリストをアルファベット順にソートして事前に取得しておく (マッピング用)
+    try:
+        json_files = sorted([f for f in os.listdir(json_dir) if f.endswith(".json")])
+    except FileNotFoundError:
+        print(f"警告: {json_dir} が見つかりません。")
+        json_files = []
+
     for i, filename in enumerate(tqdm(file_list, desc=f"データを処理中 ({os.path.basename(npz_dir)})")):
-        # 元のJSONファイル名を取得してラベルを抽出
-        json_filename = filename.replace(".npz", ".json")
-        json_path = os.path.join(json_dir, json_filename)
-        sample_labels = []
-        if os.path.exists(json_path):
-            with open(json_path, "r", errors="ignore") as f:
-                json_data = json.load(f)
-                sample_labels = json_data.get("functions", [])
+        # npzファイル名 (例: sample_10.npz) からインデックス (10) を抽出
+        stem = filename.replace(".npz", "")
+        if stem.startswith("sample_") and stem[len("sample_"):].isdigit():
+            sample_idx = int(stem[len("sample_"):])
+            if sample_idx < len(json_files):
+                json_filename = json_files[sample_idx]
+            else:
+                json_filename = None
         else:
-            print(f"警告: {json_path} が見つかりません。ラベルは空になります。")
+            json_filename = filename.replace(".npz", ".json")
+            
+        sample_labels = []
+        if json_filename is not None:
+            json_path = os.path.join(json_dir, json_filename)
+            if os.path.exists(json_path):
+                with open(json_path, "r", errors="ignore") as f:
+                    json_data = json.load(f)
+                    sample_labels = json_data.get("functions", [])
+            else:
+                print(f"警告: {json_path} が見つかりません。ラベルは空になります。")
+        else:
+            print(f"警告: {filename} に対応する JSON ファイルが特定できません。")
 
         if not labels_only:
             data = np.load(os.path.join(npz_dir, filename))
