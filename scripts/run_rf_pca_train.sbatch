@@ -12,6 +12,9 @@ date
 
 source .venv/bin/activate
 
+echo "Synchronizing labels (prepare_labels)..."
+python src/2025_RF_PCA.py prepare_labels
+
 python src/2025_RF_PCA.py train_pca
 
 echo "Training completed."

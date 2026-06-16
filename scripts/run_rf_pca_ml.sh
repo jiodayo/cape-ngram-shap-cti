@@ -13,6 +13,9 @@ if [ -f ".venv/bin/activate" ]; then
     source .venv/bin/activate
 fi
 
+echo "=== ラベルセットの同期 (prepare_labels) を開始します ==="
+python3 src/2025_RF_PCA.py prepare_labels
+
 echo "=== PCA特徴量を用いたRandom Forestの学習を開始します ==="
 python3 src/2025_RF_PCA.py train_pca
 
