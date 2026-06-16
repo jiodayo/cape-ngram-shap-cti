@@ -45,48 +45,47 @@ def load_dataset(data_path):
     return data
 
 
-def prepare_features_and_labels(npz_dir, max_sentences, features_memmap_path, labels_npy_path, label_set):
+def prepare_features_and_labels(npz_dir, max_sentences, features_memmap_path, labels_npy_path, label_set, labels_only=False):
     """
     .npzファイルから特徴量とラベルを読み込み、memmapとnpyファイルに保存する関数
-    - 特徴量: 3D -> 1Dに平坦化し、memmapに保存
-    - ラベル: マルチホットエンコーディングし、.npyに保存
+    - labels_only=Trueの場合、特徴量のmemmap生成をスキップし、ラベルのみを更新します（高速）
     """
     file_list = sorted(
         [f for f in os.listdir(npz_dir) if f.endswith(".npz")])
     num_samples = len(file_list)
 
-    # 最初のファイルから平坦化後の特徴量の次元を計算
     if num_samples == 0:
         print(f"警告: {npz_dir} に .npz ファイルが見つかりません。")
         return
 
-    # 特徴量の準備
-    data = np.load(os.path.join(npz_dir, file_list[0]))
-    embedding = data["embedding"]
-    feature_shape = embedding.shape[1:]  # (トークン数, 埋め込み次元)
-    dummy_embedding = np.zeros((max_sentences, *feature_shape))
-    flattened_dim = dummy_embedding.flatten().shape[0]
-
-    features_memmap = np.memmap(
-        features_memmap_path, dtype='float32', mode='w+', shape=(num_samples, flattened_dim))
-
     # ラベルの準備
     labels_array = np.zeros((num_samples, len(label_set)), dtype=np.int8)
 
-    for i, filename in enumerate(tqdm(file_list, desc=f"特徴量とラベルを処理中 ({os.path.basename(npz_dir)})")):
-        data = np.load(os.path.join(npz_dir, filename))
+    if not labels_only:
+        # 特徴量の次元計算とmemmap作成
+        data = np.load(os.path.join(npz_dir, file_list[0]))
         embedding = data["embedding"]
+        feature_shape = embedding.shape[1:]  # (トークン数, 埋め込み次元)
+        dummy_embedding = np.zeros((max_sentences, *feature_shape))
+        flattened_dim = dummy_embedding.flatten().shape[0]
+
+        features_memmap = np.memmap(
+            features_memmap_path, dtype='float32', mode='w+', shape=(num_samples, flattened_dim))
+
+    for i, filename in enumerate(tqdm(file_list, desc=f"データを処理中 ({os.path.basename(npz_dir)})")):
+        data = np.load(os.path.join(npz_dir, filename))
         sample_labels = data["label"]  # .npzファイル内の'label'キーを想定
 
-        # 特徴量の処理と保存
-        num_sentences = embedding.shape[0]
-        if num_sentences > max_sentences:
-            processed_embedding = embedding[:max_sentences, :, :]
-        else:
-            pad_width = ((0, max_sentences - num_sentences), (0, 0), (0, 0))
-            processed_embedding = np.pad(
-                embedding, pad_width, mode='constant', constant_values=0)
-        features_memmap[i] = processed_embedding.flatten()
+        if not labels_only:
+            embedding = data["embedding"]
+            num_sentences = embedding.shape[0]
+            if num_sentences > max_sentences:
+                processed_embedding = embedding[:max_sentences, :, :]
+            else:
+                pad_width = ((0, max_sentences - num_sentences), (0, 0), (0, 0))
+                processed_embedding = np.pad(
+                    embedding, pad_width, mode='constant', constant_values=0)
+            features_memmap[i] = processed_embedding.flatten()
 
         # ラベルのマルチホットエンコーディング
         for label in sample_labels:
@@ -95,7 +94,8 @@ def prepare_features_and_labels(npz_dir, max_sentences, features_memmap_path, la
 
     # ラベル配列を.npyファイルに保存
     np.save(labels_npy_path, labels_array)
-    print(f"特徴量を {features_memmap_path} に保存しました。Shape: {features_memmap.shape}")
+    if not labels_only:
+        print(f"特徴量を {features_memmap_path} に保存しました。Shape: {features_memmap.shape}")
     print(f"ラベルを {labels_npy_path} に保存しました。Shape: {labels_array.shape}")
 
 
@@ -220,19 +220,14 @@ def run_br_with_rf_cv(train_features, train_labels, test_features, test_labels, 
     print("モデルは 'logs/models_br_rf/' に、レポートは 'logs/final_reports_br_rf/' に保存されました。")
 
 
-def main_prepare_data():
+def main_prepare_data(labels_only=False):
     """
     モード1: 特徴量とラベルの前処理と保存
     """
-    print("--- モード: prepare_data ---")
+    print(f"--- モード: prepare_{'labels' if labels_only else 'data'} ---")
     # 2025_learning_br.pyからパスと設定を流用
     train_npz_dir = TRAIN_NPZ_DIR
     test_npz_dir = TEST_NPZ_DIR
-
-    # 訓練データからラベルセットを動的に生成
-    print("訓練データからラベルセットを構築中...")
-    train_data_path = TRAIN_JSON_PATH
-    train_samples = load_dataset(train_data_path)
 
     # ユーザー指定の17個の機能ラベル
     PREDEFINED_LABELS = {
@@ -251,18 +246,21 @@ def main_prepare_data():
     print(f"ラベルセットを {LABEL_SET_PATH} に保存しました。")
 
     # 訓練データとテストデータの特徴量とラベルを準備・保存
-    print("\n訓練データの特徴量とラベルを準備中...")
+    print(f"\n訓練データの特徴量とラベルを準備中 (labels_only={labels_only})...")
     prepare_features_and_labels(
-        train_npz_dir, MAX_SENTENCES, TRAIN_MEMMAP_PATH, TRAIN_LABELS_PATH, label_set)
+        train_npz_dir, MAX_SENTENCES, TRAIN_MEMMAP_PATH, TRAIN_LABELS_PATH, label_set, labels_only=labels_only)
 
-    print("\nテストデータの特徴量とラベルを準備中...")
+    print(f"\nテストデータの特徴量とラベルを準備中 (labels_only={labels_only})...")
     prepare_features_and_labels(
-        test_npz_dir, MAX_SENTENCES, TEST_MEMMAP_PATH, TEST_LABELS_PATH, label_set)
+        test_npz_dir, MAX_SENTENCES, TEST_MEMMAP_PATH, TEST_LABELS_PATH, label_set, labels_only=labels_only)
 
-    print("\n--- prepare_data モード完了 ---")
+    print(f"\n--- prepare_{'labels' if labels_only else 'data'} モード完了 ---")
     print("次のステップ:")
-    print(f"1. PCAによる特徴量削減を実行してください: python 2025_reduce_features.py")
-    print(f"2. PCA適用後の特徴量で学習・評価を実行してください: python {sys.argv[0]} train_pca")
+    if labels_only:
+        print(f"PCA特徴量が存在する場合は、そのまま学習・評価を実行できます: python {sys.argv[0]} train_pca")
+    else:
+        print(f"1. PCAによる特徴量削減を実行してください: python 2025_reduce_features.py")
+        print(f"2. PCA適用後の特徴量で学習・評価を実行してください: python {sys.argv[0]} train_pca")
 
 
 def main_train_pca():
@@ -320,15 +318,18 @@ def main_train_pca():
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2 or sys.argv[1] not in ["prepare_data", "train_pca"]:
+    if len(sys.argv) != 2 or sys.argv[1] not in ["prepare_data", "prepare_labels", "train_pca"]:
         print(f"使い方: python {sys.argv[0]} [mode]")
         print("  mode:")
-        print("    prepare_data : 特徴量とラベルを前処理してファイルに保存します。")
-        print("    train_pca    : PCAで次元削減された特徴量を使って学習・評価します。")
+        print("    prepare_data   : 特徴量とラベルを前処理してファイルに保存します。")
+        print("    prepare_labels : 特徴量の生成をスキップし、ラベル(17種)のみを高速に更新します。")
+        print("    train_pca      : PCAで次元削減された特徴量を使って学習・評価します。")
         sys.exit(1)
 
     mode = sys.argv[1]
     if mode == "prepare_data":
-        main_prepare_data()
+        main_prepare_data(labels_only=False)
+    elif mode == "prepare_labels":
+        main_prepare_data(labels_only=True)
     elif mode == "train_pca":
         main_train_pca()
