@@ -16,44 +16,49 @@ TEST_PCA_MEMMAP_PATH = "encoded_test_features_pca.mmap"
 # PCAモデルの保存先
 PCA_MODEL_PATH = "logs/ipca_model.joblib"
 
-# 削減後の次元数
-PCA_COMPONENTS = 128
-BATCH_SIZE = 128  # 一度に処理するサンプル数 (LAPACKの32bit integer overflow回避のため小さく設定)
+# 削減後の次元数 (希望値。実際の特徴量次元に基づいて安全な値に調整される)
+PCA_COMPONENTS_DESIRED = 128
 
 
-def get_memmap_shape(memmap_path):
+def compute_safe_params(feature_dim, desired_components):
     """
-    ファイル名からmemmapの形状とデータ型を推測するヘルパー関数。
-    注意: この方法は、ファイル名に '_{shape}_{dtype}.mmap' のような
-    情報が含まれている場合にのみ機能します。
-    今回は形状が不明なため、まず全データを読み込んで形状を取得します。
-    より良い方法は、特徴量生成時に形状を保存しておくことです。
-    """
-    # 今回は形状が不明なため、一度読み込んで形状を取得します。
-    # これは非効率ですが、現在のファイル構造から形状を知る唯一の方法です。
-    temp_memmap = np.memmap(memmap_path, dtype='float32', mode='r')
-    # 特徴量の次元数は、ファイルサイズをサンプル数で割ることで計算できるが、
-    # サンプル数が不明。そのため、最初の特徴量ファイルから次元数を取得する。
-    # ここでは、平坦化後の次元数が 140 * 32 * 768 = 3440640 であると仮定します。
-    # (MAX_SENTENCES * トークン数 * 埋め込み次元)
-    # この値は 2025_learning_RF.py の prepare_features_for_rf から取得するのが最も正確です。
-    # 実際の次元数に合わせて調整してください。
-    # 仮に訓練データが10000サンプルあるとすると...
-    # このアプローチは不安定なので、学習スクリプトから形状を直接参照するのが望ましい。
-    # 今回は、学習スクリプト側で形状が分かっているので、それを直接使います。
-    # このファイルは単独で実行されるため、形状を知る必要があります。
-    # 最初の .npz ファイルから次元を計算します。
-    train_npz_dir = "encoded_train_npz"
-    file_list = sorted([f for f in os.listdir(
-        train_npz_dir) if f.endswith(".npz")])
-    data = np.load(os.path.join(train_npz_dir, file_list[0]))
-    embedding = data["embedding"]
-    # (MAX_SENTENCES, トークン数, 埋め込み次元)
-    feature_shape = (140, embedding.shape[1], embedding.shape[2])
-    flattened_dim = np.prod(feature_shape)
+    LAPACKの32bit整数オーバーフローを回避するため、
+    実際の特徴量次元数から安全なn_componentsとbatch_sizeを自動計算する。
 
-    num_samples = len(os.listdir(train_npz_dir))  # サンプル数
-    return (num_samples, flattened_dim)
+    IncrementalPCAの2回目以降のpartial_fitでは、内部で以下の行列を結合してSVDにかける:
+      [singular_values * components]  ... (n_components, feature_dim)
+      [new_batch]                     ... (batch_size, feature_dim)
+      [mean_correction]              ... (1, feature_dim)
+    合計行数 = n_components + batch_size + 1
+
+    scipy.linalg.svd は行列の要素数が int32 の上限 (2^31-1) を超えるとエラーになるため、
+    (n_components + batch_size + 1) * feature_dim < 2^31 - 1 を満たす必要がある。
+    """
+    max_elements = np.iinfo(np.int32).max  # 2,147,483,647
+    max_total_rows = max_elements // feature_dim
+
+    # 安全マージンを10%取る
+    max_total_rows = int(max_total_rows * 0.9)
+
+    if max_total_rows < 3:
+        raise ValueError(
+            f"特徴量次元数 ({feature_dim}) が大きすぎて、PCAを適用できません。"
+            f"特徴量の次元削減を先に行ってください。"
+        )
+
+    # batch_size >= n_components が必要 (IncrementalPCAの制約)
+    # total_rows = n_components + batch_size + 1
+    # batch_size = n_components とすると: total = 2 * n_components + 1
+    # → n_components = (max_total_rows - 1) // 2
+    safe_max_components = (max_total_rows - 1) // 2
+
+    n_components = min(desired_components, safe_max_components)
+    # batch_size は n_components 以上で、かつ total が max_total_rows 以下
+    batch_size = min(max_total_rows - n_components - 1, n_components * 2)
+    # batch_size は最低でも n_components 必要
+    batch_size = max(batch_size, n_components)
+
+    return n_components, batch_size
 
 
 def main():
@@ -64,22 +69,33 @@ def main():
 
     # --- 訓練データでPCAを学習し、変換する ---
     print("訓練データの特徴量を読み込みます...")
-    # 形状を正しく取得するために、一度読み込みます。
-    # 注意：巨大なファイルの場合、ここが遅くなる可能性があります。
     X_train_original = np.memmap(TRAIN_MEMMAP_PATH, dtype='float32', mode='r')
     # 形状を (サンプル数, 特徴量次元数) にリシェイプ
-    # サンプル数はファイルリストから取得
     num_train_samples = len([f for f in os.listdir(
         "encoded_train_npz") if f.endswith(".npz")])
     X_train = X_train_original.reshape(num_train_samples, -1)
+    feature_dim = X_train.shape[1]
     print(f"訓練データの形状: {X_train.shape}")
+    print(f"特徴量次元数: {feature_dim:,}")
 
-    print(f"IncrementalPCAの学習を開始 (n_components={PCA_COMPONENTS})...")
-    ipca = IncrementalPCA(n_components=PCA_COMPONENTS, batch_size=BATCH_SIZE)
+    # LAPACKオーバーフローを回避する安全なパラメータを計算
+    n_components, batch_size = compute_safe_params(feature_dim, PCA_COMPONENTS_DESIRED)
 
+    if n_components < PCA_COMPONENTS_DESIRED:
+        print(f"警告: LAPACKのint32制限により、n_components を {PCA_COMPONENTS_DESIRED} → {n_components} に縮小しました。")
+    print(f"PCA設定: n_components={n_components}, batch_size={batch_size}")
+
+    max_elements = np.iinfo(np.int32).max
+    total_rows = n_components + batch_size + 1
+    actual_elements = total_rows * feature_dim
+    print(f"SVD行列の最大要素数: {actual_elements:,} / {max_elements:,} (使用率: {actual_elements/max_elements*100:.1f}%)")
+
+    ipca = IncrementalPCA(n_components=n_components, batch_size=batch_size)
+
+    print(f"IncrementalPCAの学習を開始 (n_components={n_components})...")
     # バッチ処理でPCAモデルを学習
-    for i in tqdm(range(0, X_train.shape[0], BATCH_SIZE), desc="IPCA fitting"):
-        ipca.partial_fit(X_train[i:i + BATCH_SIZE])
+    for i in tqdm(range(0, X_train.shape[0], batch_size), desc="IPCA fitting"):
+        ipca.partial_fit(X_train[i:i + batch_size])
 
     print("学習済みPCAモデルを保存します...")
     joblib.dump(ipca, PCA_MODEL_PATH)
@@ -88,13 +104,13 @@ def main():
     print("訓練データをPCAで変換します...")
     # 変換後のデータを保存する新しいmemmapファイルを作成
     X_train_pca = np.memmap(TRAIN_PCA_MEMMAP_PATH, dtype='float32',
-                            mode='w+', shape=(X_train.shape[0], PCA_COMPONENTS))
+                            mode='w+', shape=(X_train.shape[0], n_components))
 
     # バッチ処理でデータを変換し、新しいmemmapファイルに書き込む
-    for i in tqdm(range(0, X_train.shape[0], BATCH_SIZE), desc="IPCA transforming train"):
-        transformed_batch = ipca.transform(X_train[i:i + BATCH_SIZE])
+    for i in tqdm(range(0, X_train.shape[0], batch_size), desc="IPCA transforming train"):
+        transformed_batch = ipca.transform(X_train[i:i + batch_size])
         X_train_pca[i:i + len(transformed_batch)] = transformed_batch
-    
+
     X_train_pca.flush()
     print(f"次元削減後の訓練データを {TRAIN_PCA_MEMMAP_PATH} に保存しました。")
 
@@ -111,12 +127,12 @@ def main():
 
     print("テストデータをPCAで変換します...")
     X_test_pca = np.memmap(TEST_PCA_MEMMAP_PATH, dtype='float32',
-                           mode='w+', shape=(X_test.shape[0], PCA_COMPONENTS))
+                           mode='w+', shape=(X_test.shape[0], n_components))
 
-    for i in tqdm(range(0, X_test.shape[0], BATCH_SIZE), desc="IPCA transforming test"):
-        transformed_batch = ipca_trained.transform(X_test[i:i + BATCH_SIZE])
+    for i in tqdm(range(0, X_test.shape[0], batch_size), desc="IPCA transforming test"):
+        transformed_batch = ipca_trained.transform(X_test[i:i + batch_size])
         X_test_pca[i:i + len(transformed_batch)] = transformed_batch
-    
+
     X_test_pca.flush()
     print(f"次元削減後のテストデータを {TEST_PCA_MEMMAP_PATH} に保存しました。")
     print("すべての処理が完了しました。")
