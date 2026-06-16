@@ -234,17 +234,16 @@ def main_prepare_data():
     train_data_path = TRAIN_JSON_PATH
     train_samples = load_dataset(train_data_path)
 
-    excluded_labels = {
-        "tls_master", "file_moved", "connects_ip", "wmi_query", "directory_removed",
-        "downloads_file", "fetches_url", "command_line", "connects_host", "directory_enumerated",
-        "dll_loaded", "file_created", "file_deleted", "file_written", "resolves_host",
-        "regkey_deleted", "directory_created", "file_copied"
+    # ユーザー指定の17個の機能ラベル
+    PREDEFINED_LABELS = {
+        "command_line": 0, "connects_host": 1, "connects_ip": 2,
+        "directory_created": 3, "directory_enumerated": 4, "file_copied": 5,
+        "file_created": 6, "file_deleted": 7, "file_failed": 8, "file_read": 9,
+        "file_recreated": 10, "file_written": 11, "guid": 12, "mutex": 13,
+        "regkey_deleted": 14, "regkey_written": 15, "resolves_host": 16
     }
-
-    all_labels = sorted(
-        {label for sample in train_samples for label in sample.get("functions", [])})
-    filtered_labels = [l for l in all_labels if l not in excluded_labels]
-    label_set = {l: i for i, l in enumerate(filtered_labels)}
+    
+    label_set = PREDEFINED_LABELS
 
     print(f"対象ラベル数: {len(label_set)}")
     with open(LABEL_SET_PATH, 'w') as f:
