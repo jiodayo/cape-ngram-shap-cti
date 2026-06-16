@@ -85,6 +85,6 @@ echo ""
 
 echo "============================================="
 echo " パイプライン完了！"
-echo " レポート: ${LOGS_DIR}/final_reports_br_+exist_rf/"
-echo " モデル:   ${LOGS_DIR}/models_br_+exist_rf/"
+echo " レポート: ${LOGS_DIR}/final_reports_br_+freq_rf/"
+echo " モデル:   ${LOGS_DIR}/models_br_+freq_rf/"
 echo "============================================="

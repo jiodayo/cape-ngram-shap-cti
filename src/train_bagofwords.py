@@ -41,11 +41,11 @@ def parse_args():
         "--n-jobs", type=int, default=-1,
         help="並列処理に使うCPUコア数 (default: -1 = 全て)")
     parser.add_argument(
-        "--model-subdir", type=str, default="models_br_+exist_rf",
-        help="モデル保存サブディレクトリ名 (default: models_br_+exist_rf)")
+        "--model-subdir", type=str, default="models_br_+freq_rf",
+        help="モデル保存サブディレクトリ名 (default: models_br_+freq_rf)")
     parser.add_argument(
-        "--report-subdir", type=str, default="final_reports_br_+exist_rf",
-        help="レポート保存サブディレクトリ名 (default: final_reports_br_+exist_rf)")
+        "--report-subdir", type=str, default="final_reports_br_+freq_rf",
+        help="レポート保存サブディレクトリ名 (default: final_reports_br_+freq_rf)")
     return parser.parse_args()
 
 

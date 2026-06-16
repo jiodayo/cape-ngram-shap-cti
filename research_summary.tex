@@ -1,0 +1,243 @@
+\documentclass[11pt,a4paper,dvipdfmx]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage{graphicx}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{geometry}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{float}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage[japanese]{babel}
+
+\geometry{top=25mm, bottom=25mm, left=25mm, right=25mm}
+
+\title{寄与度ギャップと意味的特徴量を統合したマルウェア検出XAI：\\動的解析APIシーケンスに基づく高度CTIプロファイリング}
+\author{研究プロジェクト詳細仕様・理論的背景}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+本稿では、CAPE Sandboxを用いたマルウェア動的解析ログから得られるAPIコールシーケンスに対し、単純なN-gramに加えて、非隣接APIの遷移を捉えるSkip-gram、およびMicrosoftドキュメントに基づくAPIの機能的意味（セマンティクス）を反映したDescription TF-IDFという3種の直交する特徴量を抽出し、マルチラベル分類を行う機械学習アーキテクチャの理論的背景と実装の詳細を記述する。
+さらに、TreeSHAPを用いて算出した各特徴量の局所的寄与度（Local Feature Attribution）を、MITRE ATT\&CKフレームワークに基づく127のサイバー脅威インテリジェンス（CTI）ルールと照合・重み付けを行うことで、ブラックボックスモデルの判定根拠をサイバー攻撃のキルチェーン上の具体的な振る舞い（戦術・技術）として解釈し、自然言語による説明や攻撃チェーンとして復元する高度なXAIパイプラインのメカニズムを定式化する。
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{序論}
+マルウェアの分類問題において、動的解析によるAPIコールシーケンスは最も情報量の多い特徴の一つである。従来の手法はAPIシーケンスをN-gramとして切り出し、TF-IDFやWord2Vecを用いてベクトル化し、分類器に入力するアプローチが主流であった。しかし、このアプローチには以下の3つの課題が存在する。
+\begin{enumerate}
+    \item \textbf{Evasion（検知回避）への脆弱性}: 攻撃者が意図的に無意味なAPI（スリープやダミー操作）を間に挟むことで、N-gramの連続性が破壊される。
+    \item \textbf{セマンティクス（意味）の欠落}: 「CreateRemoteThread」と「VirtualAllocEx」は文字列としては異なるが、どちらもプロセスインジェクションという同一の目的（意味）を持つ。単なる出現頻度ではこの意味的近接性をモデルが事前知識として利用できない。
+    \item \textbf{ブラックボックス性と解釈可能性（Interpretability）の欠如}: ランダムフォレストやLightGBM等のアンサンブル決定木モデルは高精度であるが、「なぜそのファミリ/タイプと判定したか」の根拠がセキュリティアナリストに提示されない。
+\end{enumerate}
+
+本研究は、これらの課題を解決するため、(1) Skip-gramによる非隣接遷移の捕捉、(2) 自然言語処理を用いたAPI説明文コーパスの意味的特徴量化、(3) TreeSHAPとルールベースCTIマッピングを融合した重み付け解釈手法、という3つの新規なメカニズムを統合したエンドツーエンドのパイプラインを提案する。
+
+\section{データ処理と特徴量エンジニアリング}
+
+\subsection{動的解析ログのパースと前処理}
+CAPE Sandboxが出力するJSONレポート（\texttt{report["behavior"]["processes"][*]["calls"]}）から、各プロセスの実行タイムスタンプ順にAPIコール名（例: \texttt{NtCreateFile}）を抽出する。
+マルウェアはループ処理等で同一APIを連続して大量に呼び出すことが多いため、情報幾何学的なノイズを減らすべく、連続する同一APIの圧縮（Deduplication）を選択的に実行する。抽出されたAPIコール列を長さ $L$ のシーケンス $S = (a_1, a_2, \dots, a_L)$ とする。ここで $L$ の最大値は計算量削減のため $L_{max} = 2000$ でクリッピングされる。
+
+\subsection{3種の直交する特徴量抽出}
+
+本システムは、シーケンスから抽出した3種類のベクトル表現を水平結合（Horizontal Stack）し、統合特徴空間 $\mathbf{x} \in \mathbb{R}^{d_{seq} + d_{skip} + d_{desc}}$ を構築する。
+
+\subsubsection{Sequence N-gram 特徴量 ($\mathbf{x}_{seq}$)}
+局所的なAPIの実行文脈を捉えるため、連続する $n$ 個のAPIの組を抽出する。本研究では $n \in \{2, 3\}$（Bigram, Trigram）を使用する。
+シーケンス $S$ から抽出される $n$-gram の集合 $N_n(S)$ は次のように定義される。
+\begin{equation}
+    N_n(S) = \{ (a_i, a_{i+1}, \dots, a_{i+n-1}) \mid 1 \le i \le L - n + 1 \}
+\end{equation}
+次元数の爆発を防ぐため、文書頻度（Document Frequency）の下限（\texttt{min\_df=2}）を設け、最大特徴量数 $d_{seq}$（デフォルト200,000）で制限する。ベクトル化には \texttt{CountVectorizer}（出現回数）または \texttt{HashingVectorizer}（ハッシュトリック: $h(token) \pmod{2^{20}}$）を用いる。
+
+\subsubsection{Skip-gram 特徴量 ($\mathbf{x}_{skip}$)}
+非隣接のAPI呼び出しを捉えるため、ギャップ $g$ を許容したペア（ウィンドウサイズ $W$）を抽出する。
+ウィンドウサイズ $W=4$、最大ギャップ $G=2$ の場合、トークン $a_i$ に対して抽出されるペア集合 $K(a_i)$ は、
+\begin{equation}
+    K(a_i) = \{ (a_i, a_{i+j}) \mid 1 \le j \le W-1, \text{ subject to gap } j-1 \le G \}
+\end{equation}
+このペアは文字列として結合され、\texttt{"\{a\_i\}\_\_SKIP\{j-1\}\_\_\{a\_\{i+j\}\}"} という1つのトークンとして扱われ、Unigramとしてベクトル化される。次元数 $d_{skip}$ はデフォルト100,000とする。
+
+\subsubsection{API Description TF-IDF 特徴量 ($\mathbf{x}_{desc}$)}
+APIの文字列としての独立性を打破し、「意味の空間」へマッピングする。
+Microsoft公式ドキュメント等から手動キュレーションした204種類の重要API（18カテゴリ：インジェクション、レジストリ、暗号化等）の説明文コーパスを構築した（\texttt{api\_descriptions.json}）。
+全API説明文集合を $D$ とし、標準的な TF-IDF（Term Frequency - Inverse Document Frequency）ベクトル化（$n \in \{1, 2\}$）を行う。これにより、各API $a$ は説明文語彙空間上のベクトル $\mathbf{v}_a \in \mathbb{R}^{d_{desc}}$（$d_{desc} = 4096$）にマッピングされる。
+
+検体 $S$ における各API $a$ の出現回数を $c(a, S)$ としたとき、検体 $S$ の意味的特徴量ベクトル $\mathbf{x}_{desc}(S)$ は、検体内で使用されたAPIベクトルをその相対頻度で重み付け加算（あるいは期待値化）したものである。
+\begin{equation}
+    \mathbf{x}_{desc}(S) = \sum_{a \in S} \left( \frac{c(a, S)}{\sum_{a' \in S} c(a', S)} \right) \mathbf{v}_a
+\end{equation}
+これにより、検体が「どのような機能を持つAPI群で構成されているか」を、自然言語レベルの特徴空間で表現できる。
+
+\section{学習アーキテクチャ (Binary Relevance + LightGBM)}
+
+\subsection{マルウェアのマルチラベル問題}
+マルウェアデータセットにおけるラベル（ファミリ名：\texttt{Trojan}, \texttt{Ransomware}, \texttt{Worm} 等、またはタイプ：\texttt{Ransom.Win32.WannaCry}）は相互排他的ではない。1つの検体がドロッパーであり、かつランサムウェアである可能性がある。
+したがって、本タスクは多クラス分類（Multi-class）ではなく、多ラベル分類（Multi-label Classification）として定式化する。ラベル空間を $\mathcal{Y} = \{y_1, y_2, \dots, y_M\}$ とし、各検体の正解ラベルベクトルを $\mathbf{y} \in \{0, 1\}^M$ とする。
+
+\subsection{Binary Relevance法}
+ラベル間の相関を明示的にモデリングする手法（Classifier Chains等）もあるが、本研究では各ラベルの後段でのSHAP分析（「なぜTrojanと判定したか」の独立した解釈）を重視し、\textbf{Binary Relevance (BR)} アプローチを採用する。
+すなわち、$M$ 個のラベルそれぞれに対して独立した二値分類器 $f_m(\mathbf{x}) \rightarrow \{0, 1\}$ を訓練する。
+
+\subsection{LightGBMの適用と最適化}
+学習アルゴリズムとしてLightGBM（Light Gradient Boosting Machine）を採用する。LightGBMは以下の理由で本タスクに最適である：
+\begin{itemize}
+    \item \textbf{疎行列（Sparse Matrix）のネイティブサポート}: $\mathbf{x}_{seq}$ および $\mathbf{x}_{skip}$ は極めて疎（非ゼロ要素が全体の1\%未満）である。RandomForestを使用する場合、次元削減（TruncatedSVD等によるLSA）が必須となるが、LightGBMは疎行列を直接高速に処理可能である。
+    \item \textbf{ヒストグラムベースの決定木}: 連続値である $\mathbf{x}_{desc}$（TF-IDFベクトル）の分割点探索を離散化ビンによって高速化する。
+\end{itemize}
+
+目的関数にはBinary Loglossを使用し、マルウェアデータ特有のラベル不均衡（クラスインバランス）に対処するため、\texttt{class\_weight="balanced"} を適用する。これは、正例と負例の数に反比例する重み $w_i = \frac{N}{2 N_{y_i}}$ を各サンプルに与えるものである。
+
+主要なハイパーパラメータは以下の通りに設定した（\texttt{2026\_learning\_ngram\_desc\_br.py}）：
+\begin{itemize}
+    \item $n\_estimators = 400$
+    \item $learning\_rate = 0.05$
+    \item $num\_leaves = 63$
+    \item $subsample = 0.9, \quad colsample\_bytree = 0.9$
+\end{itemize}
+
+\section{局所・大域的解釈（TreeSHAP）と特徴量寄与度}
+
+機械学習モデル $f_m$ が検体 $\mathbf{x}$ に対して「Trojan」と判定した根拠を可視化するため、Lundbergらによって提案された \textbf{SHAP (SHapley Additive exPlanations)}、特に決定木アンサンブルに最適化された \textbf{TreeSHAP} アルゴリズムを利用する。
+
+\subsection{TreeSHAPによる特徴量ごとの寄与度分解}
+SHAPは協力ゲーム理論のシャプレー値に基づいており、モデルの予測出力 $f(\mathbf{x})$ をベースライン（期待値） $\phi_0$ と各特徴量の寄与度の線形和に完全に分解（Local Accuracy特性）する。
+\begin{equation}
+    f(\mathbf{x}) = \phi_0 + \sum_{j=1}^{d} \phi_j(\mathbf{x})
+\end{equation}
+ここで、$\phi_j(\mathbf{x})$ が特徴量 $j$ のSHAP値（局所的寄与度）である。値が正であれば対象ラベルへの所属確率を押し上げ、負であれば引き下げる。
+
+\subsection{Per-sample Top-K SHAP}
+各検体 $i$ に対し、ラベル $m$ で陽性（確率 $> 0.5$）と判定された場合、SHAP値の絶対値 $|\phi_j(\mathbf{x}_i)|$ が大きい上位 $K$ 個（本研究では $K=10$）の特徴量インデックス集合 $\mathcal{F}_{i,K}$ を抽出する。
+これが「この検体がマルウェア判定された直接的な10個の理由」となる。
+
+\subsection{Group-level SHAP（特徴量グループ間比較）}
+本研究のアーキテクチャでは、次元（特徴量）は \texttt{seq}, \texttt{skip}, \texttt{desc} の3つの直交するグループ $G \in \{\text{Seq}, \text{Skip}, \text{Desc}\}$ に属する。
+ラベル $m$ において、「どの概念（順序・非隣接・意味）が最も予測に重要であったか」を大域的（Global）に評価するため、テストデータ全体にわたるSHAP絶対値の総和（Feature Importance）をグループ単位で集計し、グループシェア $S_G$ を算出する。
+\begin{equation}
+    S_G = \frac{\sum_{i=1}^{N_{test}} \sum_{j \in G} |\phi_j(\mathbf{x}_i)|}{\sum_{i=1}^{N_{test}} \sum_{j=1}^{d} |\phi_j(\mathbf{x}_i)|}
+\end{equation}
+これにより、「ラベルAはシーケンス（振る舞いの手順）で特定できるが、ラベルBはAPIの意味ベクトル（Desc）を見ないと分類できない」といったモデリング上の寄与度ギャップを定量化できる。
+
+\section{CTIマッピングメカニズム (MITRE ATT\&CK)}
+
+抽出されたTop-KのSHAP特徴量は \texttt{seq:NtCreateThread VirtualAlloc} や \texttt{skip:CreateFile\_\_SKIP1\_\_WriteFile}、\texttt{desc:socket} のような文字列トークンである。これをアナリストが理解可能なサイバー攻撃の戦術・技術（Tactic/Technique）に変換するため、MITRE ATT\&CKとの紐付け（マッピング）を行う。
+
+\subsection{信頼度ベースのルールエンジン}
+我々は、API関数名や意味的トークンをATT\&CK技術ID（$T_{ID}$）へマッピングするための127の正規表現ルール $R$ を手動定義した（\texttt{api\_to\_attack\_rules.csv}）。
+各ルール $r \in R$ は、パターン $p_r$、対象技術 $t_r$、およびそのルールの確からしさを示す\textbf{Confidence Score} $C_r \in (0, 1]$ を持つ。
+
+例えば、
+\begin{itemize}
+    \item $r_1$: \texttt{createremotethread} $\rightarrow$ T1055 (Process Injection), $C_{r_1} = 0.95$ （高い確証）
+    \item $r_2$: \texttt{getsystemtime} $\rightarrow$ T1124 (System Time Discovery), $C_{r_2} = 0.10$ （低い確証、良性ソフトも多用する）
+\end{itemize}
+である。
+
+\subsection{特徴量から技術へのスコアリングアルゴリズム}
+検体 $i$ のTop-K特徴量集合 $\mathcal{F}_{i,K}$ から、各ATT\&CK技術 $T$ に対するスコア $S_{CTI}(T)$ を計算する。
+
+\begin{algorithm}[H]
+\caption{CTI Scoring Algorithm}
+\label{alg:cti_score}
+\begin{algorithmic}[1]
+\REQUIRE Feature set $\mathcal{F}$, Rule set $R$
+\STATE Initialize $Score(T) = 0$ for all $T$
+\FOR{each feature $f \in \mathcal{F}$}
+    \STATE Extract API tokens $W_f$ from $f$ (e.g., split by space or `\_\_SKIP\_\_`)
+    \FOR{each rule $r \in R$}
+        \IF{regex match $p_r$ in $W_f$ \OR $p_r$ in $f$}
+            \STATE $Score(t_r) \leftarrow Score(t_r) + |\phi_f| \times C_r$
+        \ENDIF
+    \ENDFOR
+\ENDFOR
+\RETURN $Score$ map sorted in descending order
+\end{algorithmic}
+\end{algorithm}
+
+この定式化における重要な貢献は、\textbf{「SHAPによるモデルからの重要度（$|\phi_f|$）」と「CTIルールによる人間の専門知識の確証度（$C_r$）」の積}をスコアとしている点である。これにより、「SHAP値は高いがノイズ・汎用APIである特徴量」が誤って高い攻撃スコアを持つことを防ぐ（$C_r$ がペナルティとして機能する）。
+
+\subsection{自然言語解説の生成}
+スコア $S_{CTI}(T)$ が上位の技術（デフォルト上位3〜5個）に対し、事前に定義した JSON テンプレート（\texttt{explanation\_templates.json}）を用いて自然言語の説明文を生成する。
+テンプレートは技術ごとに用意され、ルールマッチング時に抽出されたAPI群をプレースホルダ \texttt{\{matched\_apis\}} に動的に流し込む。
+\begin{quote}
+\textit{【例】 T1055 (Process Injection): "プロセスインジェクションにより、他のプロセスのメモリ空間で悪意のあるコードを実行しようとしています。使用されたAPI: CreateRemoteThread, WriteProcessMemory"}
+\end{quote}
+
+\section{高度なCTI分析と脅威プロファイリング}
+
+単一検体の解釈（Local Explanation）にとどまらず、データセット全体からマクロな脅威インテリジェンスを抽出するための深層分析（\texttt{cti\_advanced\_analysis.py}）を実装した。
+
+\subsection{技術共起分析 (Technique Co-occurrence)}
+同一検体内で同時に実行される技術ペアの相関を分析する。検体集合における技術 $T_A$ と $T_B$ の出現確率を $P(T_A), P(T_B)$、同時出現確率を $P(T_A \cap T_B)$ としたとき、以下の2つの指標を計算する。
+
+\textbf{1. Jaccard類似度 (Jaccard Similarity)}
+\begin{equation}
+    J(T_A, T_B) = \frac{P(T_A \cap T_B)}{P(T_A \cup T_B)} = \frac{P(T_A \cap T_B)}{P(T_A) + P(T_B) - P(T_A \cap T_B)}
+\end{equation}
+単なる集合の被り具合を示す。0から1の範囲を取る。
+
+\textbf{2. Pointwise Mutual Information (PMI)}
+\begin{equation}
+    \text{PMI}(T_A, T_B) = \log_2 \left( \frac{P(T_A \cap T_B)}{P(T_A)P(T_B)} \right)
+\end{equation}
+独立に発生する場合（$P(T_A \cap T_B) = P(T_A)P(T_B)$）にPMIは0となる。正のPMIは、2つの技術が「偶然ではなくセットで意図的に使われている」攻撃パターンであることを示唆する。
+
+\subsection{攻撃チェーンの復元と脅威レベル判定}
+マルウェアのライフサイクル（キルチェーン）を可視化するため、抽出された技術をMITRE ATT\&CKの14の戦術（Tactic）順序（例: \textit{Reconnaissance $\rightarrow$ Resource Development $\rightarrow$ Initial Access $\rightarrow \dots \rightarrow$ Impact}）にソートして並べる。
+
+また、抽出された技術スコアの総和 $S_{total} = \sum S_{CTI}(T)$ と、関与する戦術の数 $N_{tactic}$ に基づき、検体の脅威レベル（Severity）をヒューリスティックに自動判定する：
+\begin{itemize}
+    \item \textbf{Critical}: $S_{total} > 5.0$ \textbf{かつ} $N_{tactic} \ge 4$
+    \item \textbf{High}: $S_{total} > 2.0$ \textbf{かつ} $N_{tactic} \ge 3$
+    \item \textbf{Medium}: $S_{total} > 1.0$ \textbf{かつ} $N_{tactic} \ge 2$
+    \item \textbf{Low}: 上記以外
+\end{itemize}
+
+\subsection{ATT\&CK Navigator エクスポート}
+分析結果を他組織と共有・連携するため、結果をMITRE公式ツールである \textbf{ATT\&CK Navigator} (v4.5) フォーマットのJSONレイヤーファイルとしてエクスポートする。各技術のセル色は、スコアに応じて白 $\rightarrow$ 黄 $\rightarrow$ 橙 $\rightarrow$ 赤への線形補間（Linear Interpolation）グラデーションでレンダリングされる。
+
+\section{説明品質の定量評価メトリクス}
+
+XAIの文脈において、モデルの分類精度（Micro/Macro F1スコア）とは別に、「生成された説明自体がどれほど優れているか」を評価することは極めて重要である。本研究では、\texttt{evaluate\_explanation\_quality.py} において以下の5つの定量指標を導入した。
+
+\subsubsection{1. Rule Match Rate (解釈ベースライン率)}
+Top-KのSHAP特徴量のうち、CTIルール辞書に一つでもマッチした特徴量の割合。
+\begin{equation}
+    \text{Rule Match Rate} = \frac{|\{f \in \mathcal{F}_{i,K} \mid \text{matches any } r \in R\}|}{|\mathcal{F}_{i,K}|}
+\end{equation}
+この値が低い場合、モデルは未知の（あるいはルール定義が不足している）ヒューリスティックな振る舞いで判定を行っていることを意味する。
+
+\subsubsection{2. Technique Diversity (技術網羅性)}
+特定のラベル（例: Ransomware）に対して、データセット全体で何種類のユニークなATT\&CK技術IDが抽出されたかの総数。モデルがどれだけ多様な攻撃手口を学習できているかを示す。
+
+\subsubsection{3. Technique Concentration (Gini的集中度)}
+特定のラベルにおいて、抽出された全技術のスコア総和に対する、上位3技術のスコアの割合。
+\begin{equation}
+    \text{Concentration} = \frac{\sum_{k=1}^{3} S_{CTI}(T_{(k)})}{\sum_{all} S_{CTI}(T)}
+\end{equation}
+値が1に近いほど、そのマルウェアは数個の特定の手法（シグネチャ）のみに依存して検知されており、値が低い（分散している）ほど、様々な挙動を総合して検知されていることを示す。
+
+\subsubsection{4. Group Entropy (情報源エントロピー)}
+SHAP分析で求めた特徴量グループ（Seq, Skip, Desc）のシェア $S_{seq}, S_{skip}, S_{desc}$ のShannonエントロピー。
+\begin{equation}
+    H_{group} = -\sum_{g \in \{seq, skip, desc\}} S_g \log_2(S_g)
+\end{equation}
+最大値は $\log_2(3) \approx 1.585$。エントロピーが高いほど、モデルは「APIの順序」「非隣接遷移」「APIの機能的意味」の3つの直交する情報をバランス良く利用して推論していることを示し、Evasion攻撃に対するロバスト性が高いと解釈できる。
+
+\subsubsection{5. Explanation Coverage (説明カバレッジ)}
+テスト検体集合の中で、1つ以上のCTI技術が抽出され、自然言語による解説文が付与できた検体の割合。システムとしてのユーザーへの説明責任（Accountability）の指標となる。
+
+\section{結論}
+本稿では、APIコールシーケンスに対する特徴量設計から、Binary Relevance学習、TreeSHAPを用いた寄与度抽出、そして信頼度重み付けCTIマッピングまでの理論的枠組みを詳述した。
+このパイプラインは、単なるマルウェアの高精度分類にとどまらず、モデルの推論根拠をATT\&CKフレームワークに基づく攻撃チェーンとして再構成し、セキュリティアナリストの具体的なインシデント対応（IR）プロセスを支援する真のExplainable AIを実現するものである。
+\end{document}
