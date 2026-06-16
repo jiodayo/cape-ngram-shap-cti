@@ -25,7 +25,7 @@ TRAIN_MEMMAP_PATH = "encoded_train_features.mmap"
 TEST_MEMMAP_PATH = "encoded_test_features.mmap"
 TRAIN_LABELS_PATH = "encoded_train_labels.npy"
 TEST_LABELS_PATH = "encoded_test_labels.npy"
-LABEL_SET_PATH = "label_set.json"
+LABEL_SET_PATH = "label_set_pca.json"
 
 # train_pcaモードで使用するファイル (2025_reduce_features.pyが生成)
 TRAIN_MEMMAP_PCA_PATH = "encoded_train_features_pca.mmap"
