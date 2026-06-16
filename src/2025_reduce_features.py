@@ -17,8 +17,8 @@ TEST_PCA_MEMMAP_PATH = "encoded_test_features_pca.mmap"
 PCA_MODEL_PATH = "logs/ipca_model.joblib"
 
 # 削減後の次元数
-PCA_COMPONENTS = 256
-BATCH_SIZE = 512  # 一度に処理するサンプル数
+PCA_COMPONENTS = 128
+BATCH_SIZE = 128  # 一度に処理するサンプル数 (LAPACKの32bit integer overflow回避のため小さく設定)
 
 
 def get_memmap_shape(memmap_path):
