@@ -18,6 +18,7 @@ TRAIN_NPZ_DIR = "encoded_train_npz"
 TEST_NPZ_DIR = "encoded_test_npz"
 # ラベルセット生成とサンプル数確認のために使用
 TRAIN_JSON_PATH = "./2024/Dataset_Extract/2016"
+TEST_JSON_PATH = "./2024/Dataset_Extract/2017"
 
 # --- 出力ファイル設定 ---
 # prepareモードで生成されるファイル
@@ -45,7 +46,7 @@ def load_dataset(data_path):
     return data
 
 
-def prepare_features_and_labels(npz_dir, max_sentences, features_memmap_path, labels_npy_path, label_set, labels_only=False):
+def prepare_features_and_labels(npz_dir, json_dir, max_sentences, features_memmap_path, labels_npy_path, label_set, labels_only=False):
     """
     .npzファイルから特徴量とラベルを読み込み、memmapとnpyファイルに保存する関数
     - labels_only=Trueの場合、特徴量のmemmap生成をスキップし、ラベルのみを更新します（高速）
@@ -73,10 +74,19 @@ def prepare_features_and_labels(npz_dir, max_sentences, features_memmap_path, la
             features_memmap_path, dtype='float32', mode='w+', shape=(num_samples, flattened_dim))
 
     for i, filename in enumerate(tqdm(file_list, desc=f"データを処理中 ({os.path.basename(npz_dir)})")):
-        data = np.load(os.path.join(npz_dir, filename))
-        sample_labels = data["label"]  # .npzファイル内の'label'キーを想定
+        # 元のJSONファイル名を取得してラベルを抽出
+        json_filename = filename.replace(".npz", ".json")
+        json_path = os.path.join(json_dir, json_filename)
+        sample_labels = []
+        if os.path.exists(json_path):
+            with open(json_path, "r", errors="ignore") as f:
+                json_data = json.load(f)
+                sample_labels = json_data.get("functions", [])
+        else:
+            print(f"警告: {json_path} が見つかりません。ラベルは空になります。")
 
         if not labels_only:
+            data = np.load(os.path.join(npz_dir, filename))
             embedding = data["embedding"]
             num_sentences = embedding.shape[0]
             if num_sentences > max_sentences:
@@ -250,11 +260,11 @@ def main_prepare_data(labels_only=False):
     # 訓練データとテストデータの特徴量とラベルを準備・保存
     print(f"\n訓練データの特徴量とラベルを準備中 (labels_only={labels_only})...")
     prepare_features_and_labels(
-        train_npz_dir, MAX_SENTENCES, TRAIN_MEMMAP_PATH, TRAIN_LABELS_PATH, label_set, labels_only=labels_only)
+        train_npz_dir, TRAIN_JSON_PATH, MAX_SENTENCES, TRAIN_MEMMAP_PATH, TRAIN_LABELS_PATH, label_set, labels_only=labels_only)
 
     print(f"\nテストデータの特徴量とラベルを準備中 (labels_only={labels_only})...")
     prepare_features_and_labels(
-        test_npz_dir, MAX_SENTENCES, TEST_MEMMAP_PATH, TEST_LABELS_PATH, label_set, labels_only=labels_only)
+        test_npz_dir, TEST_JSON_PATH, MAX_SENTENCES, TEST_MEMMAP_PATH, TEST_LABELS_PATH, label_set, labels_only=labels_only)
 
     print(f"\n--- prepare_{'labels' if labels_only else 'data'} モード完了 ---")
     print("次のステップ:")
