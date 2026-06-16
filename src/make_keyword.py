@@ -67,9 +67,28 @@ def extract_single_keywords(input_filepath, output_filepath, top_n_phrases=5):
 
 
 if __name__ == '__main__':
-    INPUT_JSON_PATH = "api_descriptions.json"
-    OUTPUT_JSON_PATH = "api_keywords_single.json"
-    NUM_KEY_PHRASES = 3
+    import argparse
 
-    extract_single_keywords(
-        INPUT_JSON_PATH, OUTPUT_JSON_PATH, top_n_phrases=NUM_KEY_PHRASES)
+    parser = argparse.ArgumentParser(
+        description="APIの説明文からTextRankでキーワードを抽出する。")
+    parser.add_argument(
+        "--input", type=str, default="api_descriptions.json",
+        help="入力JSONファイルのパス (default: api_descriptions.json)")
+    parser.add_argument(
+        "--output", type=str, default="api_keywords_single.json",
+        help="出力JSONファイルのパス (default: api_keywords_single.json)")
+    parser.add_argument(
+        "--top-n", type=int, default=3,
+        help="キーワード候補とする元フレーズの上位N個 (default: 3)")
+    parser.add_argument(
+        "--force", action="store_true",
+        help="出力ファイルが既に存在しても上書きする")
+    args = parser.parse_args()
+
+    import os
+    if os.path.exists(args.output) and not args.force:
+        print(f"'{args.output}' は既に存在します。スキップします。")
+        print("上書きする場合は --force を付けて実行してください。")
+    else:
+        extract_single_keywords(
+            args.input, args.output, top_n_phrases=args.top_n)
