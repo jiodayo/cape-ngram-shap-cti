@@ -6,6 +6,9 @@
 #SBATCH -o logs/PCA_FULL_%j.log
 #SBATCH -e logs/PCA_FULL_%j.err
 
+# エラーが発生したら即座にスクリプトを停止する
+set -e
+
 # 日付を取得してエコー（後でログの追跡に便利）
 echo "Job started at: $(date)"
 
