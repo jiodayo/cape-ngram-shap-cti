@@ -80,8 +80,8 @@ def prepare_features_and_labels(npz_dir, json_dir, max_sentences, features_memma
         print(f"警告: {json_dir} が見つかりません。")
         json_files = []
 
-    for i, filename in enumerate(tqdm(file_list, desc=f"データを処理中 ({os.path.basename(npz_dir)})")):
-        # npzファイル名 (例: sample_10.npz) からインデックス (10) を抽出
+    # 並列処理用の関数定義
+    def process_and_write(i, filename):
         stem = filename.replace(".npz", "")
         if stem.startswith("sample_") and stem[len("sample_"):].isdigit():
             sample_idx = int(stem[len("sample_"):])
@@ -116,10 +116,16 @@ def prepare_features_and_labels(npz_dir, json_dir, max_sentences, features_memma
                     embedding, pad_width, mode='constant', constant_values=0)
             features_memmap[i] = processed_embedding.flatten()
 
-        # ラベルのマルチホットエンコーディング
         for label in sample_labels:
             if label in label_set:
                 labels_array[i, label_set[label]] = 1
+
+    # 並列処理で全ファイルを処理 (I/Oバウンドなのでthreadingが有効)
+    from joblib import Parallel, delayed
+    Parallel(n_jobs=16, backend="threading")(
+        delayed(process_and_write)(i, filename)
+        for i, filename in enumerate(tqdm(file_list, desc=f"データを処理中 ({os.path.basename(npz_dir)})"))
+    )
 
     # ラベル配列を.npyファイルに保存
     np.save(labels_npy_path, labels_array)
