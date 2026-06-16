@@ -145,6 +145,7 @@ def run_br_with_rf_cv(train_features, train_labels, test_features, test_labels, 
             # 各foldのレポートを保存
             fold_report = classification_report(
                 y_val_fold, y_val_pred,
+                labels=[0, 1],
                 target_names=[f"not_{label_name}", label_name],
                 zero_division=0
             )
@@ -175,6 +176,7 @@ def run_br_with_rf_cv(train_features, train_labels, test_features, test_labels, 
         final_report = classification_report(
             y_test_single,
             y_pred_single,
+            labels=[0, 1],
             target_names=[f"not_{label_name}", label_name],
             zero_division=0
         )
