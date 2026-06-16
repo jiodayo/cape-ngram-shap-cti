@@ -124,6 +124,7 @@ def prepare_features_and_labels(npz_dir, json_dir, max_sentences, features_memma
     # ラベル配列を.npyファイルに保存
     np.save(labels_npy_path, labels_array)
     if not labels_only:
+        features_memmap.flush()
         print(f"特徴量を {features_memmap_path} に保存しました。Shape: {features_memmap.shape}")
     print(f"ラベルを {labels_npy_path} に保存しました。Shape: {labels_array.shape}")
 

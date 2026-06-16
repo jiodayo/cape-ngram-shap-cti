@@ -94,7 +94,8 @@ def main():
     for i in tqdm(range(0, X_train.shape[0], BATCH_SIZE), desc="IPCA transforming train"):
         transformed_batch = ipca.transform(X_train[i:i + BATCH_SIZE])
         X_train_pca[i:i + len(transformed_batch)] = transformed_batch
-
+    
+    X_train_pca.flush()
     print(f"次元削減後の訓練データを {TRAIN_PCA_MEMMAP_PATH} に保存しました。")
 
     # --- 学習済みPCAモデルを使ってテストデータを変換する ---
@@ -115,7 +116,8 @@ def main():
     for i in tqdm(range(0, X_test.shape[0], BATCH_SIZE), desc="IPCA transforming test"):
         transformed_batch = ipca_trained.transform(X_test[i:i + BATCH_SIZE])
         X_test_pca[i:i + len(transformed_batch)] = transformed_batch
-
+    
+    X_test_pca.flush()
     print(f"次元削減後のテストデータを {TEST_PCA_MEMMAP_PATH} に保存しました。")
     print("すべての処理が完了しました。")
 
