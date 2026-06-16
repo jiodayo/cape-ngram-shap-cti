@@ -104,16 +104,15 @@ def process_dataset(
         # --- 特徴量ベクトルの作成 ---
         called_apis = data.get("apicalls", [])
         sample_keyword_counts = Counter()
-        called_api_set = set(called_apis)
+        api_call_counts = Counter(called_apis)
         for api in called_apis:
             if api in api_keywords:
                 sample_keyword_counts.update(api_keywords[api])
 
         feature_vector = [sample_keyword_counts.get(
             keyword, 0) for keyword in vocabulary]
-        api_presence_vector = [
-            1 if api in called_api_set else 0 for api in api_list]
-        feature_vector.extend(api_presence_vector)
+        api_freq_vector = [api_call_counts.get(api, 0) for api in api_list]
+        feature_vector.extend(api_freq_vector)
         feature_vectors.append(feature_vector)
 
         # --- ラベルベクトルの作成 ---
