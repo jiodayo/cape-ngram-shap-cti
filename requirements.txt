@@ -19,3 +19,6 @@ pandas>=2.0
 
 # Optional: Description embeddings
 # sentence-transformers>=2.2
+
+# Multi-label classification
+scikit-multilearn>=0.2.0
