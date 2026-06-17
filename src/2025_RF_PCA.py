@@ -348,6 +348,17 @@ def main_train_pca():
         train_df = pd.read_csv(train_csv_path, index_col=0)
         test_df = pd.read_csv(test_csv_path, index_col=0)
         
+        # NPZファイルからサンプルのID（ファイル名の拡張子抜き）を取得し、結合順序を合わせる
+        train_npz_files = sorted([f for f in os.listdir("encoded_train_npz") if f.endswith(".npz")])
+        train_stems = [f.replace(".npz", "") for f in train_npz_files]
+        
+        test_npz_files = sorted([f for f in os.listdir("encoded_test_npz") if f.endswith(".npz")])
+        test_stems = [f.replace(".npz", "") for f in test_npz_files]
+        
+        # フィルタリングされて欠落しているサンプルがある場合は 0 で埋める
+        train_df = train_df.reindex(train_stems).fillna(0)
+        test_df = test_df.reindex(test_stems).fillna(0)
+        
         api_cols = [col for col in train_df.columns if col.startswith("api__")]
         print(f"抽出したAPI特徴量次元数: {len(api_cols)}")
         

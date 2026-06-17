@@ -63,6 +63,12 @@ def load_data(model_type):
         # API頻度特徴量の読み込み
         test_csv_path = features_dir / "test_keyword_features.csv"
         test_df_api = pd.read_csv(test_csv_path, index_col=0)
+        
+        # NPZファイルからサンプルのIDを取得し、結合順序を合わせる
+        test_npz_files = sorted([f for f in os.listdir("encoded_test_npz") if f.endswith(".npz")])
+        test_stems = [f.replace(".npz", "") for f in test_npz_files]
+        
+        test_df_api = test_df_api.reindex(test_stems).fillna(0)
         sample_names = test_df_api.index.tolist()
         
         api_cols = [col for col in test_df_api.columns if col.startswith("api__")]
