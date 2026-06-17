@@ -318,6 +318,8 @@ def main_train_pca():
     Y_train = np.load(TRAIN_LABELS_PATH)
     Y_test = np.load(TEST_LABELS_PATH)
 
+    import pandas as pd
+
     # PCA適用済みの特徴量をmemmapでロード
     # まずは形状を特定するために、npyからサンプル数を取得
     num_train_samples = Y_train.shape[0]
@@ -330,18 +332,51 @@ def main_train_pca():
     if pca_feature_size % (num_train_samples * np.dtype('float32').itemsize) != 0:
         print("警告: PCA特徴量ファイルのサイズが不正です。次元数を正しく計算できない可能性があります。")
 
-    print(f"PCA適用後の特徴量次元数: {pca_dim}")
+    print(f"PCA適用後の特徴量次元数 (PCA単体): {pca_dim}")
 
     X_train_pca = np.memmap(TRAIN_MEMMAP_PCA_PATH, dtype='float32',
                             mode='r', shape=(num_train_samples, pca_dim))
     X_test_pca = np.memmap(TEST_MEMMAP_PCA_PATH, dtype='float32',
                            mode='r', shape=(num_test_samples, pca_dim))
 
-    print(f"訓練データの形状: X={X_train_pca.shape}, Y={Y_train.shape}")
-    print(f"テストデータの形状: X={X_test_pca.shape}, Y={Y_test.shape}")
+    # --- API頻度特徴量(301次元)とのハイブリッド化 ---
+    train_csv_path = "features/train_keyword_features.csv"
+    test_csv_path = "features/test_keyword_features.csv"
+
+    if os.path.exists(train_csv_path) and os.path.exists(test_csv_path):
+        print("API頻度特徴量 (301次元) を結合してハイブリッド化します...")
+        train_df = pd.read_csv(train_csv_path, index_col=0)
+        test_df = pd.read_csv(test_csv_path, index_col=0)
+        
+        api_cols = [col for col in train_df.columns if col.startswith("api__")]
+        print(f"抽出したAPI特徴量次元数: {len(api_cols)}")
+        
+        # PCA特徴量の名前を定義
+        pca_feature_names = [f"pca_{i}" for i in range(pca_dim)]
+        
+        # 結合した特徴量名リストを作成し、後でSHAP分析に使えるように保存
+        hybrid_feature_names = pca_feature_names + api_cols
+        os.makedirs("logs/models_br_rf", exist_ok=True)
+        with open("logs/models_br_rf/hybrid_feature_names.json", "w") as f:
+            json.dump(hybrid_feature_names, f, indent=4)
+        print("ハイブリッド特徴量名を logs/models_br_rf/hybrid_feature_names.json に保存しました。")
+        
+        # 結合処理 (メモリ上)
+        X_train_api = train_df[api_cols].values.astype('float32')
+        X_test_api = test_df[api_cols].values.astype('float32')
+        
+        X_train_hybrid = np.concatenate([X_train_pca, X_train_api], axis=1)
+        X_test_hybrid = np.concatenate([X_test_pca, X_test_api], axis=1)
+    else:
+        print(f"警告: {train_csv_path} または {test_csv_path} が見つからないため、ハイブリッド化をスキップしPCA単独で実行します。")
+        X_train_hybrid = np.array(X_train_pca)
+        X_test_hybrid = np.array(X_test_pca)
+
+    print(f"最終的な訓練データの形状: X={X_train_hybrid.shape}, Y={Y_train.shape}")
+    print(f"最終的なテストデータの形状: X={X_test_hybrid.shape}, Y={Y_test.shape}")
 
     # Binary Relevance with Random Forest を実行 (PCA後は性能重視のパラメータで)
-    run_br_with_rf_cv(X_train_pca, Y_train, X_test_pca, Y_test,
+    run_br_with_rf_cv(X_train_hybrid, Y_train, X_test_hybrid, Y_test,
                       label_set, n_estimators=100, n_jobs=-1)
 
     print("\n--- train_pca モード完了 ---")
