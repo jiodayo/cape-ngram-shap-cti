@@ -63,12 +63,8 @@ def prepare_features_and_labels(npz_dir, json_dir, max_sentences, features_memma
     labels_array = np.zeros((num_samples, len(label_set)), dtype=np.int8)
 
     if not labels_only:
-        # 特徴量の次元計算とmemmap作成
-        data = np.load(os.path.join(npz_dir, file_list[0]))
-        embedding = data["embedding"]
-        feature_shape = embedding.shape[1:]  # (トークン数, 埋め込み次元)
-        dummy_embedding = np.zeros((max_sentences, *feature_shape))
-        flattened_dim = dummy_embedding.flatten().shape[0]
+        # Mean Pooling により特徴量は常に 768次元 になる
+        flattened_dim = 768
 
         features_memmap = np.memmap(
             features_memmap_path, dtype='float32', mode='w+', shape=(num_samples, flattened_dim))
@@ -107,14 +103,10 @@ def prepare_features_and_labels(npz_dir, json_dir, max_sentences, features_memma
         if not labels_only:
             data = np.load(os.path.join(npz_dir, filename))
             embedding = data["embedding"]
-            num_sentences = embedding.shape[0]
-            if num_sentences > max_sentences:
-                processed_embedding = embedding[:max_sentences, :, :]
-            else:
-                pad_width = ((0, max_sentences - num_sentences), (0, 0), (0, 0))
-                processed_embedding = np.pad(
-                    embedding, pad_width, mode='constant', constant_values=0)
-            features_memmap[i] = processed_embedding.flatten()
+            # Mean Pooling: (num_sentences, tokens, 768) -> (768,)
+            # 全文・全トークンの平均をとることで、文脈全体の意味を表現する密なベクトルを得る
+            pooled_embedding = np.mean(embedding, axis=(0, 1))
+            features_memmap[i] = pooled_embedding
 
         for label in sample_labels:
             if label in label_set:
