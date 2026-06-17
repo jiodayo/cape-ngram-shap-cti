@@ -95,7 +95,11 @@ def main():
     print(f"IncrementalPCAの学習を開始 (n_components={n_components})...")
     # バッチ処理でPCAモデルを学習
     for i in tqdm(range(0, X_train.shape[0], batch_size), desc="IPCA fitting"):
-        ipca.partial_fit(X_train[i:i + batch_size])
+        batch = X_train[i:i + batch_size]
+        if batch.shape[0] < n_components:
+            print(f"  (末尾バッチ {batch.shape[0]}件 < n_components={n_components} のためスキップ)")
+            continue
+        ipca.partial_fit(batch)
 
     print("学習済みPCAモデルを保存します...")
     joblib.dump(ipca, PCA_MODEL_PATH)
