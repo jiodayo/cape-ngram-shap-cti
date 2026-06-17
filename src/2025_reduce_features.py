@@ -1,8 +1,10 @@
 import os
 import numpy as np
-from sklearn.decomposition import IncrementalPCA
+from sklearn.random_projection import SparseRandomProjection
+from sklearn.decomposition import PCA
 from tqdm import tqdm
 import joblib
+import time
 
 # --- 設定 ---
 # 入力するmemmapファイル
@@ -13,133 +15,128 @@ TEST_MEMMAP_PATH = "encoded_test_features.mmap"
 TRAIN_PCA_MEMMAP_PATH = "encoded_train_features_pca.mmap"
 TEST_PCA_MEMMAP_PATH = "encoded_test_features_pca.mmap"
 
-# PCAモデルの保存先
-PCA_MODEL_PATH = "logs/ipca_model.joblib"
+# モデルの保存先
+MODEL_PATH = "logs/ipca_model.joblib"
 
-# 削減後の次元数 (希望値。実際の特徴量次元に基づいて安全な値に調整される)
-PCA_COMPONENTS_DESIRED = 128
+# --- パラメータ ---
+FINAL_COMPONENTS = 128   # 最終的な出力次元数
+RP_DIM = 1000            # ランダム射影による中間次元数
+BATCH_SIZE = 64          # memmap読み込みのバッチサイズ
 
 
-def compute_safe_params(feature_dim, desired_components):
+def transform_batched(transformer, X_memmap, n_samples, out_dim, batch_size, desc):
     """
-    LAPACKの32bit整数オーバーフローを回避するため、
-    実際の特徴量次元数から安全なn_componentsとbatch_sizeを自動計算する。
-
-    IncrementalPCAの2回目以降のpartial_fitでは、内部で以下の行列を結合してSVDにかける:
-      [singular_values * components]  ... (n_components, feature_dim)
-      [new_batch]                     ... (batch_size, feature_dim)
-      [mean_correction]              ... (1, feature_dim)
-    合計行数 = n_components + batch_size + 1
-
-    scipy.linalg.svd は行列の要素数が int32 の上限 (2^31-1) を超えるとエラーになるため、
-    (n_components + batch_size + 1) * feature_dim < 2^31 - 1 を満たす必要がある。
+    巨大なmemmapデータをバッチ単位で読み込みながら変換する。
+    各バッチをメモリにコピーしてからtransformするため、メモリ使用量を制御できる。
     """
-    max_elements = np.iinfo(np.int32).max  # 2,147,483,647
-    max_total_rows = max_elements // feature_dim
-
-    # 安全マージンを10%取る
-    max_total_rows = int(max_total_rows * 0.9)
-
-    if max_total_rows < 3:
-        raise ValueError(
-            f"特徴量次元数 ({feature_dim}) が大きすぎて、PCAを適用できません。"
-            f"特徴量の次元削減を先に行ってください。"
-        )
-
-    # batch_size >= n_components が必要 (IncrementalPCAの制約)
-    # total_rows = n_components + batch_size + 1
-    # batch_size = n_components とすると: total = 2 * n_components + 1
-    # → n_components = (max_total_rows - 1) // 2
-    safe_max_components = (max_total_rows - 1) // 2
-
-    n_components = min(desired_components, safe_max_components)
-    # batch_size は n_components 以上で、かつ total が max_total_rows 以下
-    batch_size = min(max_total_rows - n_components - 1, n_components * 2)
-    # batch_size は最低でも n_components 必要
-    batch_size = max(batch_size, n_components)
-
-    return n_components, batch_size
+    result = np.zeros((n_samples, out_dim), dtype=np.float32)
+    for i in tqdm(range(0, n_samples, batch_size), desc=desc):
+        end = min(i + batch_size, n_samples)
+        batch = np.array(X_memmap[i:end])  # memmap → dense配列 (明示的コピー)
+        result[i:end] = transformer.transform(batch).astype(np.float32)
+    return result
 
 
 def main():
     """
-    メイン関数
+    2段階の次元削減を行う:
+      Step 1: SparseRandomProjection (数百万次元 → 1000次元)
+        - Johnson-Lindenstrauss補題に基づき、ペアワイズ距離を近似的に保持
+        - スパース行列を使うため、メモリ効率が高く高速
+        - LAPACKのint32オーバーフロー問題が発生しない
+      Step 2: PCA (1000次元 → 128次元)
+        - ランダム射影後の小さな行列に対して通常のPCAを適用
+        - 分散最大化の方向を求める (最適な低次元表現)
+
+    従来の IncrementalPCA (数時間) → この手法 (数分~十数分) に短縮。
     """
     os.makedirs("logs", exist_ok=True)
+    t_start = time.time()
 
-    # --- 訓練データでPCAを学習し、変換する ---
+    # --- 訓練データの読み込み ---
     print("訓練データの特徴量を読み込みます...")
-    X_train_original = np.memmap(TRAIN_MEMMAP_PATH, dtype='float32', mode='r')
-    # 形状を (サンプル数, 特徴量次元数) にリシェイプ
-    num_train_samples = len([f for f in os.listdir(
-        "encoded_train_npz") if f.endswith(".npz")])
-    X_train = X_train_original.reshape(num_train_samples, -1)
-    feature_dim = X_train.shape[1]
+    X_train_raw = np.memmap(TRAIN_MEMMAP_PATH, dtype='float32', mode='r')
+    num_train = len([f for f in os.listdir("encoded_train_npz") if f.endswith(".npz")])
+    X_train = X_train_raw.reshape(num_train, -1)
+    n_features = X_train.shape[1]
     print(f"訓練データの形状: {X_train.shape}")
-    print(f"特徴量次元数: {feature_dim:,}")
+    print(f"特徴量次元数: {n_features:,}")
 
-    # LAPACKオーバーフローを回避する安全なパラメータを計算
-    n_components, batch_size = compute_safe_params(feature_dim, PCA_COMPONENTS_DESIRED)
+    # --- Step 1: SparseRandomProjection ---
+    rp_dim = min(RP_DIM, n_features)
+    print(f"\n{'='*60}")
+    print(f"Step 1: SparseRandomProjection ({n_features:,} → {rp_dim})")
+    print(f"{'='*60}")
 
-    if n_components < PCA_COMPONENTS_DESIRED:
-        print(f"警告: LAPACKのint32制限により、n_components を {PCA_COMPONENTS_DESIRED} → {n_components} に縮小しました。")
-    print(f"PCA設定: n_components={n_components}, batch_size={batch_size}")
+    rp = SparseRandomProjection(n_components=rp_dim, random_state=42)
+    # fitにはn_featuresの情報だけが必要 (データの値は使わない)
+    rp.fit(np.zeros((1, n_features), dtype=np.float32))
 
-    max_elements = np.iinfo(np.int32).max
-    total_rows = n_components + batch_size + 1
-    actual_elements = total_rows * feature_dim
-    print(f"SVD行列の最大要素数: {actual_elements:,} / {max_elements:,} (使用率: {actual_elements/max_elements*100:.1f}%)")
+    sparse_nnz = rp.components_.nnz
+    density = sparse_nnz / (rp.components_.shape[0] * rp.components_.shape[1])
+    print(f"射影行列: shape={rp.components_.shape}, "
+          f"非ゼロ要素数={sparse_nnz:,} (密度={density:.6f})")
 
-    ipca = IncrementalPCA(n_components=n_components, batch_size=batch_size)
+    t1 = time.time()
+    X_train_rp = transform_batched(
+        rp, X_train, num_train, rp_dim, BATCH_SIZE, "RP変換 (train)")
+    print(f"ランダム射影後: {X_train_rp.shape} ({time.time()-t1:.1f}秒)")
 
-    print(f"IncrementalPCAの学習を開始 (n_components={n_components})...")
-    # バッチ処理でPCAモデルを学習
-    for i in tqdm(range(0, X_train.shape[0], batch_size), desc="IPCA fitting"):
-        batch = X_train[i:i + batch_size]
-        if batch.shape[0] < n_components:
-            print(f"  (末尾バッチ {batch.shape[0]}件 < n_components={n_components} のためスキップ)")
-            continue
-        ipca.partial_fit(batch)
+    # --- Step 2: PCA ---
+    final_dim = min(FINAL_COMPONENTS, rp_dim, num_train)
+    print(f"\n{'='*60}")
+    print(f"Step 2: PCA ({rp_dim} → {final_dim})")
+    print(f"{'='*60}")
 
-    print("学習済みPCAモデルを保存します...")
-    joblib.dump(ipca, PCA_MODEL_PATH)
-    print(f"モデルを {PCA_MODEL_PATH} に保存しました。")
+    t2 = time.time()
+    pca = PCA(n_components=final_dim, random_state=42)
+    X_train_final = pca.fit_transform(X_train_rp).astype(np.float32)
+    del X_train_rp  # メモリ解放
 
-    print("訓練データをPCAで変換します...")
-    # 変換後のデータを保存する新しいmemmapファイルを作成
-    X_train_pca = np.memmap(TRAIN_PCA_MEMMAP_PATH, dtype='float32',
-                            mode='w+', shape=(X_train.shape[0], n_components))
+    cumvar = pca.explained_variance_ratio_.sum()
+    print(f"PCA後: {X_train_final.shape} ({time.time()-t2:.1f}秒)")
+    print(f"累積寄与率 (射影後空間): {cumvar:.4f}")
 
-    # バッチ処理でデータを変換し、新しいmemmapファイルに書き込む
-    for i in tqdm(range(0, X_train.shape[0], batch_size), desc="IPCA transforming train"):
-        transformed_batch = ipca.transform(X_train[i:i + batch_size])
-        X_train_pca[i:i + len(transformed_batch)] = transformed_batch
+    # --- モデルの保存 ---
+    joblib.dump({"rp": rp, "pca": pca}, MODEL_PATH)
+    print(f"\nモデルを {MODEL_PATH} に保存しました。")
 
-    X_train_pca.flush()
-    print(f"次元削減後の訓練データを {TRAIN_PCA_MEMMAP_PATH} に保存しました。")
+    # --- 訓練データPCA特徴量をmemmapに保存 ---
+    out_train = np.memmap(TRAIN_PCA_MEMMAP_PATH, dtype='float32',
+                          mode='w+', shape=X_train_final.shape)
+    out_train[:] = X_train_final
+    out_train.flush()
+    del X_train_final
+    print(f"訓練PCA特徴量を {TRAIN_PCA_MEMMAP_PATH} に保存しました。")
 
-    # --- 学習済みPCAモデルを使ってテストデータを変換する ---
-    print("\nテストデータの特徴量を読み込みます...")
-    X_test_original = np.memmap(TEST_MEMMAP_PATH, dtype='float32', mode='r')
-    num_test_samples = len([f for f in os.listdir(
-        "encoded_test_npz") if f.endswith(".npz")])
-    X_test = X_test_original.reshape(num_test_samples, -1)
+    # --- テストデータの変換 ---
+    print(f"\n{'='*60}")
+    print(f"テストデータの変換")
+    print(f"{'='*60}")
+
+    X_test_raw = np.memmap(TEST_MEMMAP_PATH, dtype='float32', mode='r')
+    num_test = len([f for f in os.listdir("encoded_test_npz") if f.endswith(".npz")])
+    X_test = X_test_raw.reshape(num_test, -1)
     print(f"テストデータの形状: {X_test.shape}")
 
-    print("学習済みPCAモデルを読み込みます...")
-    ipca_trained = joblib.load(PCA_MODEL_PATH)
+    t3 = time.time()
+    X_test_rp = transform_batched(
+        rp, X_test, num_test, rp_dim, BATCH_SIZE, "RP変換 (test)")
+    X_test_final = pca.transform(X_test_rp).astype(np.float32)
+    del X_test_rp
+    print(f"テストデータ変換完了: {X_test_final.shape} ({time.time()-t3:.1f}秒)")
 
-    print("テストデータをPCAで変換します...")
-    X_test_pca = np.memmap(TEST_PCA_MEMMAP_PATH, dtype='float32',
-                           mode='w+', shape=(X_test.shape[0], n_components))
+    out_test = np.memmap(TEST_PCA_MEMMAP_PATH, dtype='float32',
+                         mode='w+', shape=X_test_final.shape)
+    out_test[:] = X_test_final
+    out_test.flush()
+    del X_test_final
+    print(f"テストPCA特徴量を {TEST_PCA_MEMMAP_PATH} に保存しました。")
 
-    for i in tqdm(range(0, X_test.shape[0], batch_size), desc="IPCA transforming test"):
-        transformed_batch = ipca_trained.transform(X_test[i:i + batch_size])
-        X_test_pca[i:i + len(transformed_batch)] = transformed_batch
-
-    X_test_pca.flush()
-    print(f"次元削減後のテストデータを {TEST_PCA_MEMMAP_PATH} に保存しました。")
-    print("すべての処理が完了しました。")
+    elapsed = time.time() - t_start
+    print(f"\n{'='*60}")
+    print(f"すべての処理が完了しました。総処理時間: {elapsed:.1f}秒 ({elapsed/60:.1f}分)")
+    print(f"{'='*60}")
 
 
 if __name__ == "__main__":
