@@ -16,6 +16,9 @@ if [ -f .venv/bin/activate ]; then
     source .venv/bin/activate
 fi
 
+echo "Installing requirements..."
+python3 -m pip install -r requirements.txt
+
 echo "=== 1. KeyBERTによるキーワード抽出 ==="
 python3 -m spacy download en_core_web_sm
 python3 src/make_keyword.py --force
