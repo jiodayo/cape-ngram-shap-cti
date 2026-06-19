@@ -25,125 +25,18 @@ import shap
 from tqdm import tqdm
 
 # ============================================================
-# 方針B: 機能直結キーワードの分類辞書
+# 方針B: MBC準拠のキーワードマッピング (Zero-shot)
 # ============================================================
-# キーワード → カテゴリ のマッピング。ここに載っているキーワードだけが
-# 「機能直結キーワード」として採用される。それ以外は「抽象語」としてフィルタされる。
-FUNCTIONAL_KEYWORD_CATEGORIES = {
-    # --- File 操作 ---
-    "file":         "File Operation",
-    "read":         "File Operation",
-    "write":        "File Operation",
-    "delete":       "File Operation",
-    "copy":         "File Operation",
-    "move":         "File Operation",
-    "create":       "File Operation",
-    "open":         "File Operation",
-    "directory":    "File Operation",
-    "path":         "File Operation",
-    "attribute":    "File Operation",
-    "search":       "File Operation",
-    "rename":       "File Operation",
-    "size":         "File Operation",
-    "pointer":      "File Operation",
-    "temporary":    "File Operation",
-    "save":         "File Operation",
-    "download":     "File Operation",
-    "cache":        "File Operation",
-    # --- Registry ---
-    "registry":     "Registry",
-    "key":          "Registry",
-    "value":        "Registry",
-    "subkey":       "Registry",
-    "enumerate":    "Registry",
-    # --- Process / Thread ---
-    "process":      "Process/Thread",
-    "thread":       "Process/Thread",
-    "execute":      "Process/Thread",
-    "terminate":    "Process/Thread",
-    "suspend":      "Process/Thread",
-    "resume":       "Process/Thread",
-    "inject":       "Process/Thread",
-    "snapshot":     "Process/Thread",
-    "module":       "Process/Thread",
-    "load":         "Process/Thread",
-    "library":      "Process/Thread",
-    "dll":          "Process/Thread",
-    "function":     "Process/Thread",
-    "address":      "Process/Thread",
-    # --- Network ---
-    "connect":      "Network",
-    "send":         "Network",
-    "receive":      "Network",
-    "socket":       "Network",
-    "server":       "Network",
-    "host":         "Network",
-    "url":          "Network",
-    "http":         "Network",
-    "dns":          "Network",
-    "resolve":      "Network",
-    "query":        "Network",
-    "request":      "Network",
-    "response":     "Network",
-    "connection":   "Network",
-    "internet":     "Network",
-    "network":      "Network",
-    "adapter":      "Network",
-    "port":         "Network",
-    # --- Memory ---
-    "memory":       "Memory",
-    "allocate":     "Memory",
-    "protect":      "Memory",
-    "virtual":      "Memory",
-    "heap":         "Memory",
-    "map":          "Memory",
-    "section":      "Memory",
-    "page":         "Memory",
-    "region":       "Memory",
-    # --- Service ---
-    "service":      "Service",
-    "driver":       "Service",
-    "install":      "Service",
-    "start":        "Service",
-    "control":      "Service",
-    "configuration": "Service",
-    # --- Crypto ---
-    "encrypt":      "Crypto",
-    "decrypt":      "Crypto",
-    "hash":         "Crypto",
-    "certificate":  "Crypto",
-    "cryptographic": "Crypto",
-    "cipher":       "Crypto",
-    "provider":     "Crypto",
-    # --- Security / Credential ---
-    "token":        "Security",
-    "privilege":    "Security",
-    "credential":   "Security",
-    "impersonate":  "Security",
-    "account":      "Security",
-    "security":     "Security",
-    # --- System Info ---
-    "system":       "System Info",
-    "computer":     "System Info",
-    "user":         "System Info",
-    "version":      "System Info",
-    "environment":  "System Info",
-    "volume":       "System Info",
-    "disk":         "System Info",
-    # --- Screen / Input ---
-    "screen":       "Screen/Input",
-    "capture":      "Screen/Input",
-    "keyboard":     "Screen/Input",
-    "hook":         "Screen/Input",
-    "input":        "Screen/Input",
-    "clipboard":    "Screen/Input",
-    "window":       "Screen/Input",
-    # --- Anti-Analysis ---
-    "debugger":     "Anti-Analysis",
-    "debug":        "Anti-Analysis",
-    "evasion":      "Anti-Analysis",
-    "detect":       "Anti-Analysis",
-}
+MBC_KEYWORD_MAPPING = {}
+
+def load_mbc_mapping(mapping_path="features/mbc_keyword_mapping.json"):
+    global MBC_KEYWORD_MAPPING
+    if os.path.exists(mapping_path):
+        with open(mapping_path, 'r', encoding='utf-8') as f:
+            MBC_KEYWORD_MAPPING = json.load(f)
+        print(f"MBCマッピング辞書をロードしました: {len(MBC_KEYWORD_MAPPING)}件")
+    else:
+        print(f"警告: MBCマッピング辞書 '{mapping_path}' が見つかりません。すべての機能直結判定が失敗します。")
 
 
 def parse_args():
@@ -183,8 +76,10 @@ def build_keyword_to_apis(api_keywords_path):
 
 def classify_keyword(keyword_name):
     """キーワードが機能直結語かどうかを判定し、カテゴリを返す"""
-    kw_lower = keyword_name.lower()
-    return FUNCTIONAL_KEYWORD_CATEGORIES.get(kw_lower, None)
+    kw_info = MBC_KEYWORD_MAPPING.get(keyword_name)
+    if kw_info and kw_info.get("category") != "Uncategorized (Noise)":
+        return kw_info.get("category")
+    return None
 
 
 def load_data(model_type):
@@ -313,10 +208,11 @@ def generate_html_report(output_dir, model_type, main_category_name,
     lines.append('<tr><th>#</th><th>キーワード</th><th>機能カテゴリ</th><th>平均|SHAP|</th><th>由来API（方針A）</th></tr>')
     
     cat_css = {
-        "File Operation": "cat-file", "Registry": "cat-registry",
-        "Process/Thread": "cat-process", "Network": "cat-network",
-        "Memory": "cat-memory", "Crypto": "cat-crypto",
-        "Security": "cat-security", "Service": "cat-service",
+        "File System": "cat-file", "Registry": "cat-registry",
+        "Process/Thread": "cat-process", "Network/Communication": "cat-network",
+        "Memory": "cat-memory", "Cryptography": "cat-crypto",
+        "System Info/Discovery": "cat-security", "Service": "cat-service",
+        "Synchronization": "cat-other", "GUI/Input": "cat-other", "COM": "cat-other"
     }
     
     for i, (name, val, cat) in enumerate(functional_results):
@@ -592,6 +488,9 @@ def analyze_shap(model_type, X_test, feature_names, sample_names, label_names,
 
 if __name__ == "__main__":
     args = parse_args()
+    
+    print("MBCキーワードマッピングをロード中...")
+    load_mbc_mapping()
     
     print("データの読み込み中...")
     X_test, feature_names, sample_names, label_names, models_dir = load_data(args.model_type)
