@@ -20,6 +20,7 @@ pandas>=2.0
 # Optional: Description embeddings
 sentence-transformers>=2.2
 keybert>=0.8.3
+spacy>=3.7.2
 
 # Multi-label classification
 scikit-multilearn>=0.2.0
