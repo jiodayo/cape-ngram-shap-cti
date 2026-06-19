@@ -31,6 +31,20 @@ def extract_single_keywords(input_filepath, output_filepath, top_n_phrases=3):
     with open(input_filepath, 'r', encoding='utf-8') as f:
         api_descriptions = json.load(f)
 
+    # --- API名自体がキーワードとして抽出されるのを防ぐためのブラックリスト作成 ---
+    api_blacklist = set(["api", "function"]) # 一般的すぎる不要語も追加
+    for api in api_descriptions.keys():
+        lower_api = api.lower()
+        api_blacklist.add(lower_api)
+        # 末尾のA, W, Exなどのサフィックスを取り除いたバリエーションも除外
+        if lower_api.endswith('w') or lower_api.endswith('a'):
+            base = lower_api[:-1]
+            api_blacklist.add(base)
+            if base.endswith('ex'):
+                api_blacklist.add(base[:-2])
+        if lower_api.endswith('ex'):
+            api_blacklist.add(lower_api[:-2])
+
     extracted_results = {}
 
     print("単一キーワード抽出（KeyBERT）を開始します...")
@@ -38,9 +52,11 @@ def extract_single_keywords(input_filepath, output_filepath, top_n_phrases=3):
         doc = nlp(description)
 
         # 1. spaCyを用いて意味のある単語（名詞・固有名詞・動詞）のみを残し、基本形（レンマ）にする
+        # 同時にブラックリスト（API名）に含まれる単語を除外
         filtered_words = [
             token.lemma_.lower() for token in doc 
             if not token.is_stop and not token.is_punct and token.pos_ in ["NOUN", "PROPN", "VERB"]
+            and token.lemma_.lower() not in api_blacklist
         ]
         clean_text = " ".join(filtered_words)
 
