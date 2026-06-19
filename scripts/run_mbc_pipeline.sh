@@ -17,6 +17,7 @@ if [ -f .venv/bin/activate ]; then
 fi
 
 echo "=== 1. KeyBERTによるキーワード抽出 ==="
+python3 -m spacy download en_core_web_sm
 python3 src/make_keyword.py --force
 
 echo "=== 2. BoW特徴量の生成 ==="
