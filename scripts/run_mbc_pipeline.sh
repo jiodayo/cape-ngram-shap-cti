@@ -26,7 +26,7 @@ echo "=== 3. MBC Micro-Behaviorsへのマッピング ==="
 python3 src/build_mbc_mapping.py
 
 echo "=== 4. Random Forestの学習 (Keywordモデル) ==="
-python3 src/2025_RF_PCA.py --mode keyword
+python3 src/train_bagofwords.py
 
 echo "=== 5. ハイブリッドSHAP分析 ==="
 python3 src/analyze_shap_hybrid.py --model-type keyword
