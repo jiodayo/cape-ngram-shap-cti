@@ -26,6 +26,7 @@ import json
 import os
 import sys
 import time
+import warnings
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -33,6 +34,9 @@ import joblib
 import numpy as np
 import pandas as pd
 import shap
+
+# scikit-learnのバージョン違い警告を非表示にする
+warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
 
 try:
     from openai import OpenAI
@@ -370,33 +374,29 @@ def generate_html_report(output_dir, aggregate_results, overall_result,
         '<!DOCTYPE html>', '<html lang="ja">', '<head>', '  <meta charset="utf-8">',
         f'  <title>Evidence Attribution レポート ({model_type}モデル)</title>',
         '  <style>',
-        '    * { box-sizing: border-box; }',
-        '    body { font-family: "Segoe UI", "Hiragino Sans", Arial, sans-serif; margin: 0; padding: 32px; background: #0f0f1a; color: #e0e0e8; line-height: 1.7; }',
-        '    h1 { color: #a0c4ff; border-bottom: 3px solid #7b2ff7; padding-bottom: 12px; }',
-        '    h2 { color: #c9b1ff; margin-top: 36px; border-left: 4px solid #7b2ff7; padding-left: 12px; }',
-        '    h3 { color: #a0c4ff; margin-top: 20px; }',
-        '    section { background: #1a1a2e; padding: 24px 28px; border-radius: 12px; box-shadow: 0 2px 12px rgba(0,0,0,0.3); margin-bottom: 28px; border: 1px solid #2a2a4a; }',
-        '    .overview { background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); border-color: #7b2ff7; }',
-        '    .sample-section { border-color: #00d4aa; }',
-        '    .synthesis { background: #16213e; padding: 16px 20px; border-radius: 8px; border-left: 4px solid #00d4aa; margin: 12px 0; }',
-        '    .narrative { background: #1e1e3a; padding: 16px 20px; border-radius: 8px; border-left: 4px solid #ff6b6b; margin: 12px 0; }',
-        '    .finding { background: #16213e; padding: 10px 16px; border-radius: 6px; margin: 6px 0; border-left: 3px solid #ffd93d; }',
-        '    table { border-collapse: collapse; width: 100%; margin: 16px 0; }',
-        '    th, td { border: 1px solid #2a2a4a; padding: 10px 14px; text-align: left; font-size: 14px; }',
-        '    th { background: #16213e; color: #a0c4ff; }',
-        '    tr:nth-child(even) { background: #1e1e3a; }',
-        '    .chain { font-family: monospace; font-size: 13px; color: #80cbc4; background: #0d1117; padding: 6px 10px; border-radius: 4px; display: block; margin-top: 4px; white-space: pre-wrap; }',
-        '    .label-tag { display: inline-block; background: #7b2ff7; color: #fff; padding: 4px 12px; border-radius: 16px; font-size: 13px; font-weight: 600; }',
-        '    .sample-tag { display: inline-block; background: #00d4aa; color: #0f0f1a; padding: 4px 12px; border-radius: 16px; font-size: 13px; font-weight: 600; }',
-        '    .prob-bar { height: 8px; border-radius: 4px; display: inline-block; }',
-        '    .prob-high { background: #ff6b6b; }',
-        '    .prob-mid { background: #ffd93d; }',
-        '    .prob-low { background: #4ecdc4; }',
-        '    .risk-high { color: #ff6b6b; font-weight: bold; }',
-        '    .risk-medium { color: #ffd93d; font-weight: bold; }',
-        '    .risk-low { color: #4ecdc4; font-weight: bold; }',
-        '    nav { margin: 16px 0 24px; } nav a { margin-right: 12px; color: #7b9ff7; text-decoration: none; font-size: 14px; } nav a:hover { text-decoration: underline; }',
-        '    .subtitle { color: #888; font-size: 14px; }',
+        '    body { font-family: "ＭＳ Ｐゴシック", "MS PGothic", sans-serif; background-color: #ffffff; color: #333333; margin: 20px auto; max-width: 900px; padding: 10px; line-height: 1.6; }',
+        '    h1 { font-size: 24px; border-bottom: 2px solid #666666; padding-bottom: 5px; margin-bottom: 20px; }',
+        '    h2 { font-size: 20px; border-left: 5px solid #666666; padding-left: 10px; margin-top: 30px; background-color: #f0f0f0; padding-top: 5px; padding-bottom: 5px; }',
+        '    h3 { font-size: 16px; border-bottom: 1px dotted #999999; margin-top: 20px; }',
+        '    section { margin-bottom: 30px; }',
+        '    .synthesis { background-color: #f9f9f9; border: 1px solid #cccccc; padding: 15px; margin: 10px 0; }',
+        '    .narrative { background-color: #fff4f4; border: 1px solid #ffcccc; padding: 15px; margin: 10px 0; }',
+        '    .finding { margin: 5px 0; }',
+        '    table { border-collapse: collapse; width: 100%; margin: 15px 0; }',
+        '    th, td { border: 1px solid #999999; padding: 8px; text-align: left; font-size: 14px; }',
+        '    th { background-color: #eeeeee; }',
+        '    .chain { font-family: monospace; font-size: 12px; color: #006600; display: block; margin-top: 5px; white-space: pre-wrap; }',
+        '    .label-tag { font-weight: bold; }',
+        '    .sample-tag { font-weight: bold; color: #000066; }',
+        '    .prob-bar { height: 10px; display: inline-block; background-color: #666666; }',
+        '    .risk-high { color: #cc0000; font-weight: bold; }',
+        '    .risk-medium { color: #cc6600; font-weight: bold; }',
+        '    .risk-low { color: #006600; font-weight: bold; }',
+        '    nav { margin: 10px 0 20px 0; padding: 10px; border: 1px dashed #cccccc; background-color: #fafafa; }',
+        '    nav a { margin-right: 15px; color: #0000ff; text-decoration: underline; font-size: 14px; }',
+        '    nav a:hover { color: #ff0000; }',
+        '    .subtitle { color: #666666; font-size: 14px; }',
+        '    hr { border: none; border-top: 1px dashed #999; margin: 30px 0; }',
         '  </style>',
         '</head>', '<body>',
         f'<h1>🔍 Evidence Attribution レポート — {model_type.upper()} モデル</h1>',
