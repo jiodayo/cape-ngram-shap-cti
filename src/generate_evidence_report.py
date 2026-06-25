@@ -2,16 +2,23 @@
 """
 MalEval論文の知見を取り入れた Evidence Attribution & Behavior Synthesis スクリプト。
 
-SHAPの分析結果とMBCマッピングを基に、GPT-4oを用いて
-「なぜそのキーワード/APIが根拠になるのか」を自然言語で説明するレポートを生成する。
+2つのモードで動作する:
+  (A) ラベル集約モード: 全検体を集約したSHAP結果から、ラベルごとの根拠を説明
+  (B) 検体個別モード:   指定した検体のAPIコール列・SHAP値を基に、その検体の挙動を説明
 
 参考論文:
   Zheng et al., "Beyond Classification: Evaluating LLMs for Fine-Grained
   Automatic Malware Behavior Auditing" (MalEval), arXiv:2509.14335, 2025.
 
 使い方:
-  export OPENAI_API_KEY="sk-..."
+  # ラベル集約レポートのみ
   python3 src/generate_evidence_report.py --model-type keyword
+
+  # ラベル集約 + 検体個別レポート（検体0,5,10を指定）
+  python3 src/generate_evidence_report.py --model-type keyword --sample-indices 0,5,10
+
+  # 検体個別レポートのみ
+  python3 src/generate_evidence_report.py --model-type keyword --sample-indices 0,5,10 --skip-aggregate
 """
 
 import argparse
@@ -19,8 +26,13 @@ import json
 import os
 import sys
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
+
+import joblib
+import numpy as np
+import pandas as pd
+import shap
 
 try:
     from openai import OpenAI
@@ -33,30 +45,28 @@ except ImportError:
 # ============================================================
 # GPT プロンプト設計
 # ============================================================
-SYSTEM_PROMPT = """あなたはマルウェア動的解析の専門家です。
+
+# --- ラベル集約分析用 ---
+LABEL_SYSTEM_PROMPT = """あなたはマルウェア動的解析の専門家です。
 CAPEv2サンドボックスで収集されたWindows APIコールトレースのSHAP分析結果を基に、
 マルウェアの挙動を因果的に説明するレポートを作成してください。
-
-## あなたのタスク
 
 ### タスク1: Evidence Attribution（証拠帰属）
 各キーワードについて、なぜそれがこのマルウェアラベル（機能）の根拠となるのかを、
 具体的なAPIコールの文脈に基づいて説明してください。
-セキュリティアナリストが読んで納得できる、技術的に正確な説明を心がけてください。
 
 ### タスク2: Behavior Synthesis（挙動要約）
 与えられたエビデンスを統合し、このラベルが示すマルウェアの挙動を
 簡潔かつ論理的に要約してください。
 
-## 出力フォーマット
-以下のJSON形式で返してください。すべて日本語で記述してください。
+出力は以下のJSON形式で返してください。すべて日本語で記述してください。
 ```json
 {
   "evidence_attributions": [
     {
       "keyword": "キーワード名",
       "explanation": "このキーワードが根拠となる理由の説明",
-      "causal_chain": "具体的なAPIコール → 抽出されたキーワード → MBCカテゴリ → マルウェア機能ラベル の因果連鎖",
+      "causal_chain": "具体的なAPIコール → キーワード → MBCカテゴリ → マルウェア機能ラベル の因果連鎖",
       "confidence": "high/medium/low"
     }
   ],
@@ -65,36 +75,55 @@ CAPEv2サンドボックスで収集されたWindows APIコールトレースの
 ```"""
 
 OVERALL_SYSTEM_PROMPT = """あなたはマルウェア動的解析の専門家です。
-CAPEv2サンドボックスで収集されたWindows APIコールトレースのSHAP分析結果を基に、
-マルウェアの全体的な攻撃シナリオを要約してください。
+各機能ラベルごとの挙動要約を統合し、マルウェアの全体的な攻撃シナリオを要約してください。
 
-以下の情報が与えられます:
-- マルウェアの各機能ラベルごとのSHAP分析で重要と判定されたキーワードとその説明
-- 各ラベルの挙動要約
-
-これらを統合し、マルウェアが全体としてどのような攻撃を行っているかを
-セキュリティレポートとして要約してください。
-
-## 出力フォーマット
-以下のJSON形式で返してください。すべて日本語で記述してください。
+出力は以下のJSON形式で返してください。すべて日本語で記述してください。
 ```json
 {
   "overall_narrative": "マルウェアの全体的な攻撃シナリオの要約（5-8文程度）",
-  "key_findings": [
-    "重要な発見1",
-    "重要な発見2",
-    "重要な発見3"
-  ],
+  "key_findings": ["重要な発見1", "重要な発見2", "重要な発見3"],
   "risk_assessment": "このマルウェアの危険度に関する評価（2-3文程度）"
 }
 ```"""
 
+# --- 検体個別分析用 ---
+SAMPLE_SYSTEM_PROMPT = """あなたはマルウェア動的解析の専門家です。
+CAPEv2サンドボックスで実行された特定のマルウェア検体について、
+そのAPIコールトレースとSHAP分析結果を基に、この検体が何を行っているかを
+因果的に説明してください。
 
+### タスク
+1. この検体のAPIコール列から、マルウェアとしての具体的な挙動を特定してください
+2. SHAP値が高い特徴量について、なぜそれがこの検体の分類に重要だったのかを説明してください
+3. この検体の全体的な攻撃シナリオを要約してください
+
+出力は以下のJSON形式で返してください。すべて日本語で記述してください。
+```json
+{
+  "sample_behavior": "この検体が行っている挙動の要約（3-5文）",
+  "predicted_labels_explanation": [
+    {
+      "label": "ラベル名",
+      "prediction_probability": 0.95,
+      "explanation": "なぜこのラベルが予測されたかの説明",
+      "key_evidence": ["根拠となるAPIコール/キーワード1", "根拠2"]
+    }
+  ],
+  "attack_scenario": "この検体の攻撃シナリオ全体の要約（2-3文）",
+  "risk_level": "high/medium/low",
+  "risk_reason": "リスクレベルの根拠（1-2文）"
+}
+```"""
+
+
+# ============================================================
+# 引数パーサ
+# ============================================================
 def parse_args():
     parser = argparse.ArgumentParser(
         description="MalEvalベースのEvidence Attribution & Behavior Synthesisレポート生成")
     parser.add_argument("--model-type", type=str, choices=["keyword", "pca"],
-                        default="keyword", help="分析対象のモデル（default: keyword）")
+                        default="keyword", help="分析対象のモデル (default: keyword)")
     parser.add_argument("--shap-results", type=str, default=None,
                         help="SHAP構造化結果JSONのパス (default: 自動検出)")
     parser.add_argument("--mbc-mapping", type=str, default="features/mbc_keyword_mapping.json",
@@ -107,113 +136,205 @@ def parse_args():
                         help="使用するGPTモデル (default: gpt-4o)")
     parser.add_argument("--output-dir", type=str, default=None,
                         help="出力ディレクトリ (default: SHAP結果と同じディレクトリ)")
+    # --- 検体個別分析用 ---
+    parser.add_argument("--sample-indices", type=str, default=None,
+                        help="分析対象の検体インデックス (カンマ区切り, 例: 0,5,10)")
+    parser.add_argument("--test-dir", type=str, default="2024/Dataset_Extract/2017",
+                        help="テストデータディレクトリ (default: 2024/Dataset_Extract/2017)")
+    parser.add_argument("--skip-aggregate", action="store_true",
+                        help="ラベル全体の集約分析をスキップする")
     parser.add_argument("--dry-run", action="store_true",
                         help="GPT APIを呼ばず、プロンプトのみを表示する")
     return parser.parse_args()
 
 
-def load_shap_results(shap_results_path):
-    """SHAP構造化結果JSONを読み込む"""
-    with open(shap_results_path, "r", encoding="utf-8") as f:
+# ============================================================
+# データ読み込み
+# ============================================================
+def load_shap_results(path):
+    with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
-
-def load_mbc_mapping(mbc_mapping_path):
-    """MBCマッピング辞書を読み込む"""
-    if not os.path.exists(mbc_mapping_path):
-        print(f"警告: MBCマッピング '{mbc_mapping_path}' が見つかりません。")
+def load_mbc_mapping(path):
+    if not os.path.exists(path):
+        print(f"警告: MBCマッピング '{path}' が見つかりません。")
         return {}
-    with open(mbc_mapping_path, "r", encoding="utf-8") as f:
+    with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
+def build_keyword_to_apis(path):
+    kw2apis = defaultdict(list)
+    if not os.path.exists(path):
+        return kw2apis
+    with open(path, "r", encoding="utf-8") as f:
+        for api, keywords in json.load(f).items():
+            for kw in keywords:
+                kw2apis[kw].append(api)
+    return kw2apis
 
-def build_keyword_to_apis(api_keywords_path):
-    """keyword → [API1, API2, ...] の逆引き辞書を構築"""
-    keyword_to_apis = defaultdict(list)
-    if not os.path.exists(api_keywords_path):
-        print(f"警告: '{api_keywords_path}' が見つかりません。")
-        return keyword_to_apis
-    with open(api_keywords_path, "r", encoding="utf-8") as f:
-        api_keywords = json.load(f)
-    for api_name, keywords in api_keywords.items():
-        for kw in keywords:
-            keyword_to_apis[kw].append(api_name)
-    return keyword_to_apis
-
-
-def load_api_descriptions(api_descriptions_path):
-    """API説明文を読み込む"""
-    if not os.path.exists(api_descriptions_path):
-        print(f"警告: '{api_descriptions_path}' が見つかりません。")
+def load_api_descriptions(path):
+    if not os.path.exists(path):
         return {}
-    with open(api_descriptions_path, "r", encoding="utf-8") as f:
+    with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
+def load_models_and_test_data(model_type):
+    """学習済みモデルとテストデータを読み込む"""
+    features_dir = Path("features")
+    label_set_path = features_dir / "label_set.json"
+    with open(label_set_path, "r", encoding="utf-8") as f:
+        labels = json.load(f)
+    if isinstance(labels, dict):
+        label_names = [k for k, v in sorted(labels.items(), key=lambda item: item[1])]
+    else:
+        label_names = labels
 
-def build_evidence_package(label, label_data, mbc_mapping, keyword_to_apis, api_descriptions):
-    """ラベルごとの Evidence Package を構築する"""
-    package = {
-        "label": label,
-        "category_ratio": {
-            "keyword_ratio": label_data.get("main_ratio", 0),
-            "api_ratio": label_data.get("api_ratio", 0)
-        },
-        "evidence_items": []
-    }
+    if model_type == "keyword":
+        test_df = pd.read_csv(features_dir / "test_keyword_features.csv", index_col=0)
+        feature_names = test_df.columns.tolist()
+        X_test = test_df.values
+        sample_names = test_df.index.tolist()
+        models_dir = Path("logs_keyword/models_br_+freq_rf")
+    else:
+        raise ValueError(f"検体個別分析は現在 keyword モデルのみ対応しています")
 
+    return X_test, feature_names, sample_names, label_names, models_dir
+
+def load_sample_api_calls(test_dir, sample_name):
+    """データセットJSONからサンプルの生APIコール列を読み込む"""
+    sample_path = Path(test_dir) / f"{sample_name}.json"
+    if not sample_path.exists():
+        return None, None
+    with open(sample_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return data.get("apicalls", []), data.get("functions", [])
+
+
+# ============================================================
+# ラベル集約分析（Mode A）
+# ============================================================
+def build_label_evidence_package(label, label_data, mbc_mapping, keyword_to_apis, api_descriptions):
+    package = {"label": label, "evidence_items": []}
     for kw_info in label_data.get("functional_keywords", []):
         keyword = kw_info["keyword"]
         source_apis = keyword_to_apis.get(keyword, [])
-
-        # API説明文を収集（最大5件）
         api_descs = {}
         for api in source_apis[:5]:
             if api in api_descriptions:
-                # 説明文が長い場合は先頭200文字に制限
                 desc = api_descriptions[api]
-                if len(desc) > 200:
-                    desc = desc[:200] + "..."
-                api_descs[api] = desc
-
-        item = {
+                api_descs[api] = desc[:200] + "..." if len(desc) > 200 else desc
+        package["evidence_items"].append({
             "keyword": keyword,
             "shap_importance": kw_info["shap_importance"],
             "mbc_category": kw_info.get("category", "Unknown"),
-            "source_apis": source_apis[:8],  # 最大8件
+            "source_apis": source_apis[:8],
             "api_descriptions": api_descs
-        }
-        package["evidence_items"].append(item)
-
+        })
     return package
 
-
-def build_user_prompt_for_label(evidence_package):
-    """ラベルごとのユーザープロンプトを構築"""
-    label = evidence_package["label"]
-    ratio = evidence_package["category_ratio"]
-
+def build_user_prompt_for_label(pkg):
     lines = [
-        f"## 分析対象ラベル: {label}",
-        f"キーワード特徴量の寄与率: {ratio['keyword_ratio']:.1f}% / API頻度特徴量の寄与率: {ratio['api_ratio']:.1f}%",
+        f"## 分析対象ラベル: {pkg['label']}",
         "",
         "## SHAPで重要と判定されたキーワード一覧:",
     ]
-
-    for i, item in enumerate(evidence_package["evidence_items"]):
+    for i, item in enumerate(pkg["evidence_items"]):
         lines.append(f"\n### {i+1}. キーワード: \"{item['keyword']}\" (SHAP重要度: {item['shap_importance']:.6f})")
         lines.append(f"   - MBCカテゴリ: {item['mbc_category']}")
         lines.append(f"   - 由来API: {', '.join(item['source_apis'])}")
-
         if item["api_descriptions"]:
             lines.append("   - API機能説明:")
             for api, desc in item["api_descriptions"].items():
                 lines.append(f"     * {api}: {desc}")
+    return "\n".join(lines)
+
+
+# ============================================================
+# 検体個別分析（Mode B）
+# ============================================================
+def compute_sample_shap(sample_vector, models_dir, label_names, feature_names):
+    """特定サンプルのSHAP値を全ラベルについて計算する"""
+    results = {}
+    sample_2d = sample_vector.reshape(1, -1)
+
+    for label in label_names:
+        model_path = models_dir / f"{label}.joblib"
+        if not model_path.exists():
+            continue
+        model = joblib.load(model_path)
+        explainer = shap.TreeExplainer(model)
+        shap_obj = explainer(sample_2d)
+
+        if len(shap_obj.shape) == 3:
+            shap_vals = shap_obj.values[0, :, 1]
+        else:
+            shap_vals = shap_obj.values[0]
+
+        pred_proba = float(model.predict_proba(sample_2d)[0][1])
+
+        # SHAP寄与量の絶対値上位10件
+        top_idx = np.argsort(np.abs(shap_vals))[::-1][:10]
+        top_features = [
+            {"feature": feature_names[j],
+             "shap_value": round(float(shap_vals[j]), 6),
+             "feature_value": round(float(sample_vector[j]), 4)}
+            for j in top_idx
+        ]
+        results[label] = {"prediction_probability": round(pred_proba, 4),
+                          "top_features": top_features}
+    return results
+
+def build_user_prompt_for_sample(sample_name, api_calls, ground_truth_labels,
+                                  shap_results, feature_names, feature_vector,
+                                  keyword_to_apis, mbc_mapping):
+    """検体個別分析用のプロンプトを構築する"""
+    lines = [f"## 検体名: {sample_name}", ""]
+
+    # --- APIコール列サマリ ---
+    if api_calls:
+        api_counts = Counter(api_calls)
+        lines.append("### この検体が呼び出したAPI（上位20件、呼び出し回数順）:")
+        for rank, (api, cnt) in enumerate(api_counts.most_common(20), 1):
+            lines.append(f"  {rank:2d}. {api}: {cnt}回")
+        lines.append(f"\n  合計ユニークAPI数: {len(api_counts)}, 合計APIコール数: {len(api_calls)}")
+    else:
+        lines.append("### APIコール情報: 取得不可")
+
+    # --- 正解ラベル ---
+    if ground_truth_labels:
+        lines.append(f"\n### 正解ラベル（データセット上の機能）: {', '.join(ground_truth_labels)}")
+
+    # --- アクティブなキーワード特徴量 ---
+    lines.append("\n### この検体で値が非ゼロのキーワード特徴量:")
+    active_kws = []
+    for i, fname in enumerate(feature_names):
+        if not fname.startswith("api__") and feature_vector[i] > 0:
+            mbc_cat = mbc_mapping.get(fname, {}).get("category", "N/A")
+            active_kws.append((fname, feature_vector[i], mbc_cat))
+    active_kws.sort(key=lambda x: x[1], reverse=True)
+    for kw, val, cat in active_kws[:30]:
+        lines.append(f"  - {kw}: {val:.0f} (MBC: {cat})")
+
+    # --- 予測確率が高いラベルのSHAP ---
+    lines.append("\n### ラベル予測確率とSHAP上位特徴量:")
+    sorted_labels = sorted(shap_results.items(),
+                           key=lambda x: x[1]["prediction_probability"], reverse=True)
+    for label, ldata in sorted_labels:
+        prob = ldata["prediction_probability"]
+        if prob < 0.1:
+            continue  # 予測確率が低いラベルは省略
+        lines.append(f"\n  #### ラベル: {label} (予測確率: {prob:.3f})")
+        for feat in ldata["top_features"][:5]:
+            direction = "↑" if feat["shap_value"] > 0 else "↓"
+            lines.append(f"    - {feat['feature']}: SHAP={feat['shap_value']:+.4f} {direction} (値={feat['feature_value']})")
 
     return "\n".join(lines)
 
 
+# ============================================================
+# GPT API 呼び出し
+# ============================================================
 def call_gpt(client, model, system_prompt, user_prompt, max_retries=3):
-    """GPT APIを呼び出し、JSONレスポンスをパースして返す"""
     for attempt in range(max_retries):
         try:
             response = client.chat.completions.create(
@@ -225,309 +346,315 @@ def call_gpt(client, model, system_prompt, user_prompt, max_retries=3):
                 temperature=0.3,
                 response_format={"type": "json_object"}
             )
-            content = response.choices[0].message.content
-            return json.loads(content)
-
+            return json.loads(response.choices[0].message.content)
         except json.JSONDecodeError as e:
-            print(f"  警告: JSONパースエラー (attempt {attempt+1}/{max_retries}): {e}")
-            if attempt < max_retries - 1:
-                time.sleep(2 ** attempt)
-            else:
-                # 最後のリトライでも失敗した場合、raw textを返す
-                return {"error": "JSONパース失敗", "raw_response": content}
-
+            print(f"  警告: JSONパースエラー (attempt {attempt+1}): {e}")
+            if attempt == max_retries - 1:
+                return {"error": "JSONパース失敗", "raw": response.choices[0].message.content}
         except Exception as e:
-            print(f"  警告: API呼び出しエラー (attempt {attempt+1}/{max_retries}): {e}")
-            if attempt < max_retries - 1:
-                time.sleep(2 ** (attempt + 1))
-            else:
+            print(f"  警告: API呼び出しエラー (attempt {attempt+1}): {e}")
+            if attempt == max_retries - 1:
                 return {"error": str(e)}
+        time.sleep(2 ** attempt)
 
 
-def generate_html_report(output_dir, all_label_results, overall_result, model_type):
-    """Evidence Attribution & Behavior Synthesis のHTMLレポートを生成"""
+# ============================================================
+# HTML レポート生成
+# ============================================================
+def generate_html_report(output_dir, aggregate_results, overall_result,
+                          sample_results, model_type):
     html_path = output_dir / "evidence_report.html"
-
-    cat_css = {
-        "File System": "cat-file", "Registry": "cat-registry",
-        "Process/Thread": "cat-process", "Network/Communication": "cat-network",
-        "Memory": "cat-memory", "Cryptography": "cat-crypto",
-        "System Info/Discovery": "cat-sysinfo", "Service": "cat-service",
-        "Synchronization": "cat-sync", "GUI/Input": "cat-gui", "COM": "cat-com"
-    }
-    confidence_icons = {"high": "🟢", "medium": "🟡", "low": "🔴"}
+    conf_icons = {"high": "🟢", "medium": "🟡", "low": "🔴"}
 
     lines = [
-        '<!DOCTYPE html>',
-        '<html lang="ja">',
-        '<head>',
-        '  <meta charset="utf-8">',
+        '<!DOCTYPE html>', '<html lang="ja">', '<head>', '  <meta charset="utf-8">',
         f'  <title>Evidence Attribution レポート ({model_type}モデル)</title>',
         '  <style>',
         '    * { box-sizing: border-box; }',
         '    body { font-family: "Segoe UI", "Hiragino Sans", Arial, sans-serif; margin: 0; padding: 32px; background: #0f0f1a; color: #e0e0e8; line-height: 1.7; }',
-        '    h1 { color: #a0c4ff; border-bottom: 3px solid #7b2ff7; padding-bottom: 12px; font-size: 28px; }',
-        '    h2 { color: #c9b1ff; margin-top: 36px; font-size: 22px; border-left: 4px solid #7b2ff7; padding-left: 12px; }',
-        '    h3 { color: #a0c4ff; margin-top: 20px; font-size: 16px; }',
+        '    h1 { color: #a0c4ff; border-bottom: 3px solid #7b2ff7; padding-bottom: 12px; }',
+        '    h2 { color: #c9b1ff; margin-top: 36px; border-left: 4px solid #7b2ff7; padding-left: 12px; }',
+        '    h3 { color: #a0c4ff; margin-top: 20px; }',
         '    section { background: #1a1a2e; padding: 24px 28px; border-radius: 12px; box-shadow: 0 2px 12px rgba(0,0,0,0.3); margin-bottom: 28px; border: 1px solid #2a2a4a; }',
-        '    .overview-section { background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); border: 1px solid #7b2ff7; }',
-        '    .synthesis { background: #16213e; padding: 16px 20px; border-radius: 8px; border-left: 4px solid #00d4aa; font-size: 15px; margin: 12px 0; }',
-        '    .narrative { background: #1e1e3a; padding: 16px 20px; border-radius: 8px; border-left: 4px solid #ff6b6b; font-size: 15px; margin: 12px 0; }',
+        '    .overview { background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); border-color: #7b2ff7; }',
+        '    .sample-section { border-color: #00d4aa; }',
+        '    .synthesis { background: #16213e; padding: 16px 20px; border-radius: 8px; border-left: 4px solid #00d4aa; margin: 12px 0; }',
+        '    .narrative { background: #1e1e3a; padding: 16px 20px; border-radius: 8px; border-left: 4px solid #ff6b6b; margin: 12px 0; }',
         '    .finding { background: #16213e; padding: 10px 16px; border-radius: 6px; margin: 6px 0; border-left: 3px solid #ffd93d; }',
         '    table { border-collapse: collapse; width: 100%; margin: 16px 0; }',
         '    th, td { border: 1px solid #2a2a4a; padding: 10px 14px; text-align: left; font-size: 14px; }',
-        '    th { background: #16213e; font-weight: 600; color: #a0c4ff; }',
+        '    th { background: #16213e; color: #a0c4ff; }',
         '    tr:nth-child(even) { background: #1e1e3a; }',
-        '    tr:hover { background: #252550; }',
-        '    .category-badge { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 600; }',
-        '    .cat-file { background: #1b4332; color: #95d5b2; }',
-        '    .cat-registry { background: #1b3a5c; color: #90caf9; }',
-        '    .cat-process { background: #4a1942; color: #f48fb1; }',
-        '    .cat-network { background: #1a3c4a; color: #80deea; }',
-        '    .cat-memory { background: #2a2a3a; color: #b0bec5; }',
-        '    .cat-crypto { background: #4a3f1a; color: #ffd54f; }',
-        '    .cat-sysinfo { background: #3a1a1a; color: #ef9a9a; }',
-        '    .cat-service { background: #2a2a2a; color: #bdbdbd; }',
-        '    .cat-sync { background: #1a2a3a; color: #81d4fa; }',
-        '    .cat-gui { background: #2a1a3a; color: #ce93d8; }',
-        '    .cat-com { background: #1a2a2a; color: #a5d6a7; }',
-        '    .causal-chain { font-family: "Courier New", monospace; font-size: 13px; color: #80cbc4; background: #0d1117; padding: 8px 12px; border-radius: 6px; display: block; margin-top: 4px; white-space: pre-wrap; }',
-        '    .confidence { font-size: 16px; }',
-        '    nav { margin: 16px 0 24px 0; }',
-        '    nav a { margin-right: 12px; color: #7b9ff7; text-decoration: none; font-size: 14px; }',
-        '    nav a:hover { text-decoration: underline; color: #a0c4ff; }',
-        '    .label-tag { display: inline-block; background: #7b2ff7; color: #fff; padding: 4px 12px; border-radius: 16px; font-size: 13px; font-weight: 600; margin-right: 8px; }',
-        '    .subtitle { color: #888; font-size: 14px; margin-top: -8px; }',
+        '    .chain { font-family: monospace; font-size: 13px; color: #80cbc4; background: #0d1117; padding: 6px 10px; border-radius: 4px; display: block; margin-top: 4px; white-space: pre-wrap; }',
+        '    .label-tag { display: inline-block; background: #7b2ff7; color: #fff; padding: 4px 12px; border-radius: 16px; font-size: 13px; font-weight: 600; }',
+        '    .sample-tag { display: inline-block; background: #00d4aa; color: #0f0f1a; padding: 4px 12px; border-radius: 16px; font-size: 13px; font-weight: 600; }',
+        '    .prob-bar { height: 8px; border-radius: 4px; display: inline-block; }',
+        '    .prob-high { background: #ff6b6b; }',
+        '    .prob-mid { background: #ffd93d; }',
+        '    .prob-low { background: #4ecdc4; }',
+        '    .risk-high { color: #ff6b6b; font-weight: bold; }',
+        '    .risk-medium { color: #ffd93d; font-weight: bold; }',
+        '    .risk-low { color: #4ecdc4; font-weight: bold; }',
+        '    nav { margin: 16px 0 24px; } nav a { margin-right: 12px; color: #7b9ff7; text-decoration: none; font-size: 14px; } nav a:hover { text-decoration: underline; }',
+        '    .subtitle { color: #888; font-size: 14px; }',
         '  </style>',
-        '</head>',
-        '<body>',
+        '</head>', '<body>',
         f'<h1>🔍 Evidence Attribution レポート — {model_type.upper()} モデル</h1>',
         '<p class="subtitle">MalEval (Zheng et al., 2025) の手法に基づく、SHAP分析結果の因果的説明</p>',
         '<nav>',
-        '  <a href="#overview">📋 全体サマリ</a>',
     ]
 
     # ナビゲーション
-    for label in all_label_results:
-        lines.append(f'  <a href="#label-{label}">📌 {label}</a>')
+    if overall_result:
+        lines.append('  <a href="#overview">📋 全体サマリ</a>')
+    if aggregate_results:
+        for label in aggregate_results:
+            lines.append(f'  <a href="#label-{label}">📌 {label}</a>')
+    if sample_results:
+        for sname in sample_results:
+            lines.append(f'  <a href="#sample-{sname}">🔬 {sname}</a>')
     lines.append('</nav>')
 
     # === 全体サマリ ===
-    lines.append('<section id="overview" class="overview-section">')
-    lines.append('<h2>📋 全体サマリ（Overall Attack Narrative）</h2>')
     if overall_result and "overall_narrative" in overall_result:
+        lines.append('<section id="overview" class="overview">')
+        lines.append('<h2>📋 全体サマリ</h2>')
         lines.append(f'<div class="synthesis">{overall_result["overall_narrative"]}</div>')
-
         if "key_findings" in overall_result:
             lines.append('<h3>🔑 重要な発見</h3>')
-            for finding in overall_result["key_findings"]:
-                lines.append(f'<div class="finding">{finding}</div>')
-
+            for f in overall_result["key_findings"]:
+                lines.append(f'<div class="finding">{f}</div>')
         if "risk_assessment" in overall_result:
             lines.append('<h3>⚠️ リスク評価</h3>')
             lines.append(f'<div class="narrative">{overall_result["risk_assessment"]}</div>')
-    elif overall_result and "error" in overall_result:
-        lines.append(f'<p>⚠️ 全体サマリの生成に失敗しました: {overall_result["error"]}</p>')
-    lines.append('</section>')
+        lines.append('</section>')
 
-    # === ラベル別セクション ===
-    for label, result in all_label_results.items():
+    # === ラベル別 ===
+    for label, res in aggregate_results.items():
         lines.append(f'<section id="label-{label}">')
-        lines.append(f'<h2><span class="label-tag">{label}</span> Evidence Attribution</h2>')
+        lines.append(f'<h2><span class="label-tag">{label}</span></h2>')
+        if "error" in res:
+            lines.append(f'<p>⚠️ {res["error"]}</p>')
+        else:
+            if "behavior_synthesis" in res:
+                lines.append('<h3>📝 挙動の要約</h3>')
+                lines.append(f'<div class="synthesis">{res["behavior_synthesis"]}</div>')
+            if "evidence_attributions" in res:
+                lines.append('<h3>🔗 根拠の詳細</h3><table>')
+                lines.append('<tr><th>キーワード</th><th>根拠の説明</th><th>因果連鎖</th><th>確信度</th></tr>')
+                for a in res["evidence_attributions"]:
+                    ci = conf_icons.get(a.get("confidence", "medium"), "⚪")
+                    lines.append(f'<tr><td><strong>{a.get("keyword","")}</strong></td>')
+                    lines.append(f'<td>{a.get("explanation","")}</td>')
+                    lines.append(f'<td><span class="chain">{a.get("causal_chain","")}</span></td>')
+                    lines.append(f'<td>{ci} {a.get("confidence","")}</td></tr>')
+                lines.append('</table>')
+        lines.append('</section>')
 
-        if "error" in result:
-            lines.append(f'<p>⚠️ このラベルの分析に失敗しました: {result["error"]}</p>')
-            lines.append('</section>')
-            continue
+    # === 検体個別 ===
+    for sname, sres in sample_results.items():
+        lines.append(f'<section id="sample-{sname}" class="sample-section">')
+        lines.append(f'<h2><span class="sample-tag">🔬 検体: {sname}</span></h2>')
+        if "error" in sres:
+            lines.append(f'<p>⚠️ {sres["error"]}</p>')
+        else:
+            if "sample_behavior" in sres:
+                lines.append('<h3>📝 検体の挙動要約</h3>')
+                lines.append(f'<div class="synthesis">{sres["sample_behavior"]}</div>')
 
-        # Behavior Synthesis
-        if "behavior_synthesis" in result:
-            lines.append('<h3>📝 挙動の要約（Behavior Synthesis）</h3>')
-            lines.append(f'<div class="synthesis">{result["behavior_synthesis"]}</div>')
+            if "predicted_labels_explanation" in sres:
+                lines.append('<h3>🏷️ 予測ラベルの根拠</h3><table>')
+                lines.append('<tr><th>ラベル</th><th>予測確率</th><th>説明</th><th>根拠</th></tr>')
+                for pl in sres["predicted_labels_explanation"]:
+                    prob = pl.get("prediction_probability", 0)
+                    pcls = "prob-high" if prob > 0.7 else ("prob-mid" if prob > 0.3 else "prob-low")
+                    evidence = ", ".join(pl.get("key_evidence", []))
+                    lines.append(f'<tr><td><strong>{pl.get("label","")}</strong></td>')
+                    lines.append(f'<td><span class="prob-bar {pcls}" style="width:{int(prob*100)}px"></span> {prob:.1%}</td>')
+                    lines.append(f'<td>{pl.get("explanation","")}</td>')
+                    lines.append(f'<td>{evidence}</td></tr>')
+                lines.append('</table>')
 
-        # Evidence Attribution テーブル
-        if "evidence_attributions" in result and result["evidence_attributions"]:
-            lines.append('<h3>🔗 根拠の詳細（Evidence Attribution）</h3>')
-            lines.append('<table>')
-            lines.append('<tr><th>キーワード</th><th>カテゴリ</th><th>根拠の説明</th><th>確信度</th></tr>')
+            if "attack_scenario" in sres:
+                lines.append('<h3>🎯 攻撃シナリオ</h3>')
+                lines.append(f'<div class="narrative">{sres["attack_scenario"]}</div>')
 
-            for attr in result["evidence_attributions"]:
-                kw = attr.get("keyword", "")
-                explanation = attr.get("explanation", "")
-                chain = attr.get("causal_chain", "")
-                conf = attr.get("confidence", "medium")
-                # カテゴリは evidence_package から取得できないので、explanation から推測
-                conf_icon = confidence_icons.get(conf, "⚪")
-
-                lines.append('<tr>')
-                lines.append(f'  <td><strong>{kw}</strong></td>')
-                lines.append(f'  <td>—</td>')
-                lines.append(f'  <td>{explanation}<span class="causal-chain">{chain}</span></td>')
-                lines.append(f'  <td class="confidence">{conf_icon} {conf}</td>')
-                lines.append('</tr>')
-
-            lines.append('</table>')
-
+            risk = sres.get("risk_level", "")
+            if risk:
+                rcls = f"risk-{risk}"
+                lines.append(f'<h3>⚠️ リスク評価: <span class="{rcls}">{risk.upper()}</span></h3>')
+                if "risk_reason" in sres:
+                    lines.append(f'<p>{sres["risk_reason"]}</p>')
         lines.append('</section>')
 
     lines.extend([
-        '<footer style="text-align: center; color: #555; margin-top: 40px; font-size: 12px;">',
+        '<footer style="text-align:center;color:#555;margin-top:40px;font-size:12px;">',
         '  Generated by generate_evidence_report.py | Based on MalEval (Zheng et al., 2025)',
-        '</footer>',
-        '</body></html>'
+        '</footer>', '</body></html>'
     ])
-
     html_path.write_text("\n".join(lines), encoding="utf-8")
     print(f"HTMLレポートを {html_path} に保存しました。")
 
 
+# ============================================================
+# メイン
+# ============================================================
 def main():
     args = parse_args()
 
-    # --- APIキーの確認 ---
+    # --- APIキー確認 ---
     if not args.dry_run:
-        api_key = os.environ.get("OPENAI_API_KEY")
-        if not api_key:
+        if not os.environ.get("OPENAI_API_KEY"):
             print("エラー: 環境変数 OPENAI_API_KEY が設定されていません。")
-            print("  export OPENAI_API_KEY='sk-...'")
             sys.exit(1)
         client = OpenAI()
         print(f"GPTモデル: {args.gpt_model}")
     else:
         client = None
-        print("=== DRY RUN モード（GPT APIは呼び出しません） ===")
+        print("=== DRY RUN モード ===")
 
-    # --- データの読み込み ---
-    shap_results_path = args.shap_results
-    if shap_results_path is None:
-        shap_results_path = f"logs_shap_analysis/{args.model_type}/shap_structured_results.json"
-
-    if not os.path.exists(shap_results_path):
-        print(f"エラー: SHAP構造化結果が見つかりません: {shap_results_path}")
-        print("先に analyze_shap_hybrid.py を実行してください。")
-        sys.exit(1)
-
-    print(f"SHAP結果を読み込み中: {shap_results_path}")
-    shap_results = load_shap_results(shap_results_path)
-
-    print(f"MBCマッピングを読み込み中: {args.mbc_mapping}")
+    # --- 共通データ読み込み ---
+    print("共通データを読み込み中...")
     mbc_mapping = load_mbc_mapping(args.mbc_mapping)
-
-    print(f"APIキーワード逆引き辞書を構築中: {args.api_keywords}")
     keyword_to_apis = build_keyword_to_apis(args.api_keywords)
-
-    print(f"API説明文を読み込み中: {args.api_descriptions}")
     api_descriptions = load_api_descriptions(args.api_descriptions)
 
     # --- 出力ディレクトリ ---
+    shap_results_path = args.shap_results or f"logs_shap_analysis/{args.model_type}/shap_structured_results.json"
     output_dir = Path(args.output_dir) if args.output_dir else Path(shap_results_path).parent
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # --- ラベルごとの Evidence Attribution ---
-    per_label = shap_results.get("per_label", {})
-    all_label_results = {}
-    label_syntheses = {}  # 全体サマリ用に各ラベルの要約を収集
-
-    total_labels = len(per_label)
-    print(f"\n{'='*60}")
-    print(f"Evidence Attribution を {total_labels} ラベルについて実行します")
-    print(f"{'='*60}")
-
-    for i, (label, label_data) in enumerate(per_label.items()):
-        print(f"\n[{i+1}/{total_labels}] ラベル: {label}")
-
-        # キーワードが無いラベルはスキップ
-        if not label_data.get("functional_keywords"):
-            print(f"  → 機能直結キーワードが無いためスキップ")
-            all_label_results[label] = {
-                "behavior_synthesis": "このラベルに対して機能直結キーワードが検出されなかったため、分析をスキップしました。",
-                "evidence_attributions": []
-            }
-            continue
-
-        # Evidence Package の構築
-        evidence_package = build_evidence_package(
-            label, label_data, mbc_mapping, keyword_to_apis, api_descriptions
-        )
-        user_prompt = build_user_prompt_for_label(evidence_package)
-
-        if args.dry_run:
-            print(f"  --- プロンプト ---")
-            print(user_prompt[:500] + "..." if len(user_prompt) > 500 else user_prompt)
-            all_label_results[label] = {"dry_run": True}
-            continue
-
-        # GPT API 呼び出し
-        print(f"  GPT-4o に問い合わせ中...")
-        result = call_gpt(client, args.gpt_model, SYSTEM_PROMPT, user_prompt)
-
-        if "error" in result:
-            print(f"  ⚠️ エラー: {result['error']}")
-        else:
-            n_attrs = len(result.get("evidence_attributions", []))
-            print(f"  ✅ 完了: {n_attrs}件のEvidence Attribution を取得")
-            if "behavior_synthesis" in result:
-                label_syntheses[label] = result["behavior_synthesis"]
-
-        all_label_results[label] = result
-
-        # 中間結果を保存（万が一の途中失敗に備える）
-        intermediate_path = output_dir / "evidence_results_partial.json"
-        with open(intermediate_path, "w", encoding="utf-8") as f:
-            json.dump(all_label_results, f, indent=2, ensure_ascii=False)
-
-        # レート制限対策
-        time.sleep(1)
-
-    # --- 全体サマリの生成 ---
+    aggregate_results = {}
     overall_result = {}
-    if not args.dry_run and label_syntheses:
+    sample_results = {}
+
+    # ==========================================
+    # Mode A: ラベル集約分析
+    # ==========================================
+    if not args.skip_aggregate:
+        if not os.path.exists(shap_results_path):
+            print(f"警告: SHAP構造化結果が見つかりません: {shap_results_path}")
+            print("ラベル集約分析をスキップします。")
+        else:
+            shap_results = load_shap_results(shap_results_path)
+            per_label = shap_results.get("per_label", {})
+            total = len(per_label)
+            label_syntheses = {}
+
+            print(f"\n{'='*60}")
+            print(f"[Mode A] ラベル集約 Evidence Attribution ({total} ラベル)")
+            print(f"{'='*60}")
+
+            for i, (label, ldata) in enumerate(per_label.items()):
+                print(f"\n[{i+1}/{total}] ラベル: {label}")
+                if not ldata.get("functional_keywords"):
+                    print("  → キーワード無し、スキップ")
+                    aggregate_results[label] = {"behavior_synthesis": "機能直結キーワード無し", "evidence_attributions": []}
+                    continue
+
+                pkg = build_label_evidence_package(label, ldata, mbc_mapping, keyword_to_apis, api_descriptions)
+                prompt = build_user_prompt_for_label(pkg)
+
+                if args.dry_run:
+                    print(prompt[:400] + "...")
+                    aggregate_results[label] = {"dry_run": True}
+                    continue
+
+                print("  GPT に問い合わせ中...")
+                result = call_gpt(client, args.gpt_model, LABEL_SYSTEM_PROMPT, prompt)
+                if "error" not in result and "behavior_synthesis" in result:
+                    label_syntheses[label] = result["behavior_synthesis"]
+                    print(f"  ✅ 完了")
+                else:
+                    print(f"  ⚠️ {result.get('error', '不明なエラー')}")
+                aggregate_results[label] = result
+                time.sleep(1)
+
+            # 全体サマリ
+            if not args.dry_run and label_syntheses:
+                print(f"\n全体攻撃シナリオを生成中...")
+                summary_lines = [f"### {l}: {s}" for l, s in label_syntheses.items()]
+                overall_prompt = "\n".join(summary_lines) + "\n\n上記を統合し、全体的な攻撃シナリオを要約してください。"
+                overall_result = call_gpt(client, args.gpt_model, OVERALL_SYSTEM_PROMPT, overall_prompt)
+                print("  ✅ 全体サマリ完了" if "error" not in overall_result else f"  ⚠️ {overall_result.get('error')}")
+
+    # ==========================================
+    # Mode B: 検体個別分析
+    # ==========================================
+    if args.sample_indices:
+        indices = [int(x.strip()) for x in args.sample_indices.split(",")]
+
         print(f"\n{'='*60}")
-        print(f"全体の攻撃シナリオサマリを生成中...")
+        print(f"[Mode B] 検体個別 Evidence Attribution ({len(indices)} 検体)")
         print(f"{'='*60}")
 
-        overall_prompt_lines = ["以下は各マルウェア機能ラベルのSHAP分析に基づく挙動要約です:\n"]
-        for label, synthesis in label_syntheses.items():
-            overall_prompt_lines.append(f"### ラベル: {label}")
-            overall_prompt_lines.append(f"{synthesis}\n")
-        overall_prompt = "\n".join(overall_prompt_lines)
-        overall_prompt += "\n上記の全ラベルの挙動を統合し、マルウェアの全体的な攻撃シナリオを要約してください。"
+        print("モデルとテストデータを読み込み中...")
+        X_test, feature_names, sample_names, label_names, models_dir = \
+            load_models_and_test_data(args.model_type)
 
-        overall_result = call_gpt(client, args.gpt_model, OVERALL_SYSTEM_PROMPT, overall_prompt)
+        for si, idx in enumerate(indices):
+            if idx >= len(sample_names):
+                print(f"\n⚠️ インデックス {idx} は範囲外です (最大: {len(sample_names)-1})")
+                continue
 
-        if "error" in overall_result:
-            print(f"  ⚠️ 全体サマリのエラー: {overall_result['error']}")
-        else:
-            print(f"  ✅ 全体サマリの生成完了")
+            sname = str(sample_names[idx])
+            print(f"\n[{si+1}/{len(indices)}] 検体: {sname} (index={idx})")
 
-    # --- 結果の保存 ---
-    # JSON
-    final_results = {
-        "model_type": shap_results.get("model_type", args.model_type),
+            sample_vector = X_test[idx]
+
+            # APIコール列を読み込み
+            print("  APIコール列を読み込み中...")
+            api_calls, gt_labels = load_sample_api_calls(args.test_dir, sname)
+            if api_calls is None:
+                print(f"  警告: {sname}.json が見つかりません。APIコール情報なしで続行します。")
+                api_calls = []
+                gt_labels = []
+
+            # SHAP計算
+            print(f"  SHAP値を計算中 ({len(label_names)} ラベル)...")
+            shap_result = compute_sample_shap(sample_vector, models_dir, label_names, feature_names)
+
+            # プロンプト構築
+            prompt = build_user_prompt_for_sample(
+                sname, api_calls, gt_labels, shap_result,
+                feature_names, sample_vector, keyword_to_apis, mbc_mapping
+            )
+
+            if args.dry_run:
+                print(prompt[:600] + "...")
+                sample_results[sname] = {"dry_run": True}
+                continue
+
+            print("  GPT に問い合わせ中...")
+            result = call_gpt(client, args.gpt_model, SAMPLE_SYSTEM_PROMPT, prompt)
+            if "error" not in result:
+                print(f"  ✅ 完了")
+            else:
+                print(f"  ⚠️ {result.get('error')}")
+            sample_results[sname] = result
+            time.sleep(1)
+
+    # ==========================================
+    # 結果保存
+    # ==========================================
+    final = {
+        "model_type": args.model_type,
         "gpt_model": args.gpt_model,
         "overall": overall_result,
-        "per_label": all_label_results
+        "per_label": aggregate_results,
+        "per_sample": sample_results
     }
     json_path = output_dir / "evidence_report.json"
     with open(json_path, "w", encoding="utf-8") as f:
-        json.dump(final_results, f, indent=2, ensure_ascii=False)
-    print(f"\nJSON結果を {json_path} に保存しました。")
+        json.dump(final, f, indent=2, ensure_ascii=False)
+    print(f"\nJSON: {json_path}")
 
-    # 中間ファイルを削除
-    intermediate_path = output_dir / "evidence_results_partial.json"
-    if intermediate_path.exists():
-        intermediate_path.unlink()
-
-    # HTML
     if not args.dry_run:
-        generate_html_report(output_dir, all_label_results, overall_result, args.model_type)
+        generate_html_report(output_dir, aggregate_results, overall_result, sample_results, args.model_type)
 
     print(f"\n{'='*60}")
-    print(f"Evidence Attribution レポートの生成が完了しました！")
+    print("Evidence Attribution レポートの生成が完了しました！")
     print(f"{'='*60}")
-    print(f"  - {json_path}   (構造化データ)")
-    if not args.dry_run:
-        print(f"  - {output_dir / 'evidence_report.html'}   (HTMLレポート)")
 
 
 if __name__ == "__main__":
