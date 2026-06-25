@@ -35,8 +35,9 @@ import numpy as np
 import pandas as pd
 import shap
 
-# scikit-learnのバージョン違い警告を非表示にする
-warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
+# scikit-learnのバージョン違い警告をより確実に非表示にする
+warnings.filterwarnings("ignore", message=".*Trying to unpickle estimator.*")
+warnings.filterwarnings("ignore", category=UserWarning)
 
 try:
     from openai import OpenAI
