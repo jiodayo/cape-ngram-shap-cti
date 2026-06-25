@@ -24,3 +24,6 @@ spacy>=3.7.2
 
 # Multi-label classification
 scikit-multilearn>=0.2.0
+
+# Evidence Attribution (GPT API)
+openai>=1.0

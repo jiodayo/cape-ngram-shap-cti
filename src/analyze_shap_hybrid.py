@@ -480,10 +480,51 @@ def analyze_shap(model_type, X_test, feature_names, sample_names, label_names,
         per_label_functional_top
     )
     
+    # --- 構造化JSONレポート（Evidence Report用） ---
+    structured_results = {
+        "model_type": model_type,
+        "overall": {
+            "main_category_name": main_category_name,
+            "main_ratio": round(main_ratio, 2),
+            "api_ratio": round(api_ratio, 2),
+            "functional_keywords": [
+                {"keyword": name, "shap_importance": round(float(val), 6), "category": cat}
+                for name, val, cat in functional_results[:top_n]
+            ],
+            "abstract_keywords": [
+                {"keyword": name, "shap_importance": round(float(val), 6)}
+                for name, val in abstract_results[:20]
+            ],
+            "api_features": [
+                {"api": name.replace("api__", ""), "shap_importance": round(float(val), 6)}
+                for name, val in api_results[:top_n]
+            ]
+        },
+        "per_label": {}
+    }
+    for label in label_names:
+        if label in per_label_category_ratios:
+            mr, ar = per_label_category_ratios[label]
+            label_data = {
+                "main_ratio": round(mr, 2),
+                "api_ratio": round(ar, 2),
+                "functional_keywords": []
+            }
+            if label in per_label_functional_top:
+                label_data["functional_keywords"] = [
+                    {"keyword": kw_name, "shap_importance": round(float(kw_val), 6), "category": kw_cat}
+                    for kw_name, kw_val, kw_cat in per_label_functional_top[label]
+                ]
+            structured_results["per_label"][label] = label_data
+
+    with open(output_dir / "shap_structured_results.json", "w", encoding="utf-8") as f:
+        json.dump(structured_results, f, indent=2, ensure_ascii=False)
+
     print(f"\n結果を {output_dir} に保存しました。")
-    print(f"  - overall_report.txt  (テキストレポート)")
-    print(f"  - shap_report.html    (学会向けHTMLレポート)")
-    print(f"  - waterfall_*.png     (各ラベルのWaterfall)")
+    print(f"  - overall_report.txt             (テキストレポート)")
+    print(f"  - shap_report.html               (学会向けHTMLレポート)")
+    print(f"  - shap_structured_results.json   (構造化データ)")
+    print(f"  - waterfall_*.png                (各ラベルのWaterfall)")
 
 
 if __name__ == "__main__":

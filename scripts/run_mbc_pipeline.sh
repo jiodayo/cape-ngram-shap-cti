@@ -31,4 +31,12 @@ python3 src/train_bagofwords.py
 echo "=== 5. ハイブリッドSHAP分析 ==="
 python3 src/analyze_shap_hybrid.py --model-type keyword
 
+echo "=== 6. Evidence Attribution レポート生成 (GPT-4o) ==="
+if [ -z "${OPENAI_API_KEY}" ]; then
+    echo "警告: OPENAI_API_KEY が未設定のためStep 6をスキップします。"
+    echo "手動で実行する場合: export OPENAI_API_KEY='sk-...' && python3 src/generate_evidence_report.py"
+else
+    python3 src/generate_evidence_report.py --model-type keyword
+fi
+
 echo "Job finished at: $(date)"
