@@ -368,7 +368,6 @@ def call_gpt(client, model, system_prompt, user_prompt, max_retries=3):
 def generate_html_report(output_dir, aggregate_results, overall_result,
                           sample_results, model_type):
     html_path = output_dir / "evidence_report.html"
-    conf_icons = {"high": "🟢", "medium": "🟡", "low": "🔴"}
 
     lines = [
         '<!DOCTYPE html>', '<html lang="ja">', '<head>', '  <meta charset="utf-8">',
@@ -399,33 +398,32 @@ def generate_html_report(output_dir, aggregate_results, overall_result,
         '    hr { border: none; border-top: 1px dashed #999; margin: 30px 0; }',
         '  </style>',
         '</head>', '<body>',
-        f'<h1>🔍 Evidence Attribution レポート — {model_type.upper()} モデル</h1>',
-        '<p class="subtitle">MalEval (Zheng et al., 2025) の手法に基づく、SHAP分析結果の因果的説明</p>',
+        f'<h1>Evidence Attribution レポート — {model_type.upper()} モデル</h1>',
         '<nav>',
     ]
 
     # ナビゲーション
     if overall_result:
-        lines.append('  <a href="#overview">📋 全体サマリ</a>')
+        lines.append('  <a href="#overview">全体サマリ</a>')
     if aggregate_results:
         for label in aggregate_results:
-            lines.append(f'  <a href="#label-{label}">📌 {label}</a>')
+            lines.append(f'  <a href="#label-{label}">{label}</a>')
     if sample_results:
         for sname in sample_results:
-            lines.append(f'  <a href="#sample-{sname}">🔬 {sname}</a>')
+            lines.append(f'  <a href="#sample-{sname}">{sname}</a>')
     lines.append('</nav>')
 
     # === 全体サマリ ===
     if overall_result and "overall_narrative" in overall_result:
         lines.append('<section id="overview" class="overview">')
-        lines.append('<h2>📋 全体サマリ</h2>')
+        lines.append('<h2>全体サマリ</h2>')
         lines.append(f'<div class="synthesis">{overall_result["overall_narrative"]}</div>')
         if "key_findings" in overall_result:
-            lines.append('<h3>🔑 重要な発見</h3>')
+            lines.append('<h3>重要な発見</h3>')
             for f in overall_result["key_findings"]:
                 lines.append(f'<div class="finding">{f}</div>')
         if "risk_assessment" in overall_result:
-            lines.append('<h3>⚠️ リスク評価</h3>')
+            lines.append('<h3>リスク評価</h3>')
             lines.append(f'<div class="narrative">{overall_result["risk_assessment"]}</div>')
         lines.append('</section>')
 
@@ -434,36 +432,35 @@ def generate_html_report(output_dir, aggregate_results, overall_result,
         lines.append(f'<section id="label-{label}">')
         lines.append(f'<h2><span class="label-tag">{label}</span></h2>')
         if "error" in res:
-            lines.append(f'<p>⚠️ {res["error"]}</p>')
+            lines.append(f'<p>エラー: {res["error"]}</p>')
         else:
             if "behavior_synthesis" in res:
-                lines.append('<h3>📝 挙動の要約</h3>')
+                lines.append('<h3>挙動の要約</h3>')
                 lines.append(f'<div class="synthesis">{res["behavior_synthesis"]}</div>')
             if "evidence_attributions" in res:
-                lines.append('<h3>🔗 根拠の詳細</h3><table>')
+                lines.append('<h3>根拠の詳細</h3><table>')
                 lines.append('<tr><th>キーワード</th><th>根拠の説明</th><th>因果連鎖</th><th>確信度</th></tr>')
                 for a in res["evidence_attributions"]:
-                    ci = conf_icons.get(a.get("confidence", "medium"), "⚪")
                     lines.append(f'<tr><td><strong>{a.get("keyword","")}</strong></td>')
                     lines.append(f'<td>{a.get("explanation","")}</td>')
                     lines.append(f'<td><span class="chain">{a.get("causal_chain","")}</span></td>')
-                    lines.append(f'<td>{ci} {a.get("confidence","")}</td></tr>')
+                    lines.append(f'<td>{a.get("confidence","")}</td></tr>')
                 lines.append('</table>')
         lines.append('</section>')
 
     # === 検体個別 ===
     for sname, sres in sample_results.items():
         lines.append(f'<section id="sample-{sname}" class="sample-section">')
-        lines.append(f'<h2><span class="sample-tag">🔬 検体: {sname}</span></h2>')
+        lines.append(f'<h2><span class="sample-tag">検体: {sname}</span></h2>')
         if "error" in sres:
-            lines.append(f'<p>⚠️ {sres["error"]}</p>')
+            lines.append(f'<p>エラー: {sres["error"]}</p>')
         else:
             if "sample_behavior" in sres:
-                lines.append('<h3>📝 検体の挙動要約</h3>')
+                lines.append('<h3>検体の挙動要約</h3>')
                 lines.append(f'<div class="synthesis">{sres["sample_behavior"]}</div>')
 
             if "predicted_labels_explanation" in sres:
-                lines.append('<h3>🏷️ 予測ラベルの根拠</h3><table>')
+                lines.append('<h3>予測ラベルの根拠</h3><table>')
                 lines.append('<tr><th>ラベル</th><th>予測確率</th><th>説明</th><th>根拠</th></tr>')
                 for pl in sres["predicted_labels_explanation"]:
                     prob = pl.get("prediction_probability", 0)
@@ -476,20 +473,20 @@ def generate_html_report(output_dir, aggregate_results, overall_result,
                 lines.append('</table>')
 
             if "attack_scenario" in sres:
-                lines.append('<h3>🎯 攻撃シナリオ</h3>')
+                lines.append('<h3>攻撃シナリオ</h3>')
                 lines.append(f'<div class="narrative">{sres["attack_scenario"]}</div>')
 
             risk = sres.get("risk_level", "")
             if risk:
                 rcls = f"risk-{risk}"
-                lines.append(f'<h3>⚠️ リスク評価: <span class="{rcls}">{risk.upper()}</span></h3>')
+                lines.append(f'<h3>リスク評価: <span class="{rcls}">{risk.upper()}</span></h3>')
                 if "risk_reason" in sres:
                     lines.append(f'<p>{sres["risk_reason"]}</p>')
         lines.append('</section>')
 
     lines.extend([
         '<footer style="text-align:center;color:#555;margin-top:40px;font-size:12px;">',
-        '  Generated by generate_evidence_report.py | Based on MalEval (Zheng et al., 2025)',
+        '  Generated by generate_evidence_report.py',
         '</footer>', '</body></html>'
     ])
     html_path.write_text("\n".join(lines), encoding="utf-8")
