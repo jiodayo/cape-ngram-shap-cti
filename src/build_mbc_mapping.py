@@ -9,7 +9,7 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 
-def build_mapping(input_filepath, output_filepath, min_keywords=5):
+def build_mapping(input_filepath, output_filepath):
     if not os.path.exists(input_filepath):
         print(f"エラー: 入力ファイル '{input_filepath}' が見つかりません。")
         return
@@ -62,6 +62,16 @@ def build_mapping(input_filepath, output_filepath, min_keywords=5):
     print(f"\n[データドリブン選定] スコア分布の75パーセンタイルから動的閾値を算出: {dynamic_threshold:.4f}")
 
     # --- カテゴリの自動フィルタリング ---
+    # 閾値を超えたキーワード数を数える
+    above_threshold_count = int(np.sum(max_similarities >= dynamic_threshold))
+    
+    # 期待値の算出: もし均等に分配されたら各カテゴリに何個入るか
+    expected_per_category = above_threshold_count / len(mbc_categories)
+    # 期待値以上の集積があるカテゴリのみ採用（最低1）
+    min_keywords = max(1, int(np.ceil(expected_per_category)))
+    print(f"[データドリブン選定] 閾値超えキーワード数: {above_threshold_count}, カテゴリ数: {len(mbc_categories)}")
+    print(f"[データドリブン選定] 期待値 = {expected_per_category:.2f} → 最小キーワード数(min_keywords) = {min_keywords}")
+    
     print(f"\n各カテゴリに閾値以上のキーワードが {min_keywords} 個以上あるか検証中...")
     category_counts = {}
     for i, kw in enumerate(unique_keywords):
@@ -127,7 +137,6 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="キーワードをMBC Micro-Behaviorsにマッピングする。")
     parser.add_argument("--input", type=str, default="api_keywords_single.json", help="入力となるキーワードJSONファイル")
     parser.add_argument("--output", type=str, default="features/mbc_keyword_mapping.json", help="出力するマッピング結果JSONファイル")
-    parser.add_argument("--min-keywords", type=int, default=5, help="採用されるために必要な最小キーワード数")
     args = parser.parse_args()
 
-    build_mapping(args.input, args.output, min_keywords=args.min_keywords)
+    build_mapping(args.input, args.output)
