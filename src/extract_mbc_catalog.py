@@ -1,8 +1,17 @@
 import json
+import os
 
 def main():
     try:
-        with open("mbc.json", "r", encoding="utf-8") as f:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        mbc_input = os.path.join(script_dir, "..", "mbc.json")
+        mbc_output = os.path.join(script_dir, "mbc_full_categories.json")
+        
+        if not os.path.exists(mbc_input):
+            # フォールバック: カレントディレクトリのmbc.jsonを探す
+            mbc_input = "mbc.json"
+        
+        with open(mbc_input, "r", encoding="utf-8") as f:
             data = json.load(f)
         
         behaviors = {}
@@ -24,7 +33,7 @@ def main():
         
         print(f"Extracted {len(behaviors)} MBC behaviors.")
         
-        with open("src/mbc_full_categories.json", "w", encoding="utf-8") as f:
+        with open(mbc_output, "w", encoding="utf-8") as f:
             json.dump(behaviors, f, indent=4, ensure_ascii=False)
             
     except Exception as e:
