@@ -145,6 +145,41 @@ def generate_html_report(output_dir, model_type, main_category_name,
     """学会向けの総合HTMLレポートを生成する"""
     html_path = output_dir / "shap_report.html"
     
+    # --- 全ラベルで登場するMBCカテゴリの一覧を収集 ---
+    all_mbc_categories = set()
+    for label, top_kws in per_label_functional_top.items():
+        for kw_name, kw_val, kw_cat in top_kws:
+            all_mbc_categories.add(kw_cat)
+    all_mbc_categories = sorted(all_mbc_categories)
+    
+    # --- ラベル×カテゴリのSHAP重要度マトリクスを構築 ---
+    heatmap_data = {}
+    for label, top_kws in per_label_functional_top.items():
+        cat_sums = defaultdict(float)
+        for kw_name, kw_val, kw_cat in top_kws:
+            cat_sums[kw_cat] += kw_val
+        heatmap_data[label] = cat_sums
+    
+    # ヒートマップの最大値（色の正規化用）
+    heatmap_max = 0.0
+    for cat_sums in heatmap_data.values():
+        for v in cat_sums.values():
+            if v > heatmap_max:
+                heatmap_max = v
+    if heatmap_max == 0:
+        heatmap_max = 1.0
+
+    # --- ラベル間で共通して重要なキーワードを抽出 ---
+    keyword_label_count = defaultdict(lambda: {"count": 0, "labels": [], "total_shap": 0.0, "category": ""})
+    for label, top_kws in per_label_functional_top.items():
+        for kw_name, kw_val, kw_cat in top_kws:
+            keyword_label_count[kw_name]["count"] += 1
+            keyword_label_count[kw_name]["labels"].append(label)
+            keyword_label_count[kw_name]["total_shap"] += kw_val
+            keyword_label_count[kw_name]["category"] = kw_cat
+    shared_keywords = [(k, v) for k, v in keyword_label_count.items() if v["count"] >= 2]
+    shared_keywords.sort(key=lambda x: x[1]["count"], reverse=True)
+
     lines = [
         '<!DOCTYPE html>',
         '<html lang="ja">',
@@ -152,77 +187,68 @@ def generate_html_report(output_dir, model_type, main_category_name,
         '  <meta charset="utf-8">',
         f'  <title>SHAP分析レポート ({model_type}モデル)</title>',
         '  <style>',
-        '    body { font-family: "Segoe UI", Arial, sans-serif; margin: 32px; background: #f8f9fa; color: #1a1a2e; }',
-        '    h1 { color: #0f3460; border-bottom: 3px solid #e94560; padding-bottom: 8px; }',
-        '    h2 { color: #16213e; margin-top: 32px; }',
-        '    h3 { color: #0f3460; }',
-        '    table { border-collapse: collapse; width: 100%; margin: 12px 0; background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,0.08); }',
-        '    th, td { border: 1px solid #dee2e6; padding: 8px 12px; text-align: left; font-size: 14px; }',
-        '    th { background: #e8ecf1; font-weight: 600; }',
-        '    tr:nth-child(even) { background: #f8f9fa; }',
-        '    .highlight { background: #fff3cd !important; }',
-        '    .functional { color: #0d6efd; font-weight: 600; }',
-        '    .abstract { color: #6c757d; font-style: italic; }',
-        '    .api-origin { font-size: 12px; color: #495057; }',
-        '    .category-badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; }',
-        '    .cat-file { background: #d4edda; color: #155724; }',
-        '    .cat-registry { background: #cce5ff; color: #004085; }',
-        '    .cat-process { background: #f8d7da; color: #721c24; }',
-        '    .cat-network { background: #d1ecf1; color: #0c5460; }',
-        '    .cat-memory { background: #e2e3e5; color: #383d41; }',
-        '    .cat-crypto { background: #fff3cd; color: #856404; }',
-        '    .cat-security { background: #f5c6cb; color: #721c24; }',
-        '    .cat-service { background: #d6d8db; color: #1b1e21; }',
-        '    .cat-other { background: #e8ecf1; color: #495057; }',
-        '    .bar { height: 20px; display: inline-block; border-radius: 4px; }',
-        '    .bar-main { background: #0d6efd; }',
-        '    .bar-api { background: #fd7e14; }',
-        '    .ratio-container { display: flex; width: 300px; border-radius: 4px; overflow: hidden; }',
-        '    .waterfall-img { max-width: 100%; border: 1px solid #dee2e6; border-radius: 4px; margin: 8px 0; }',
-        '    nav a { margin-right: 12px; color: #0d6efd; text-decoration: none; }',
-        '    nav a:hover { text-decoration: underline; }',
-        '    section { background: #fff; padding: 20px 24px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); margin-bottom: 24px; }',
+        '    body { font-family: "MS PGothic", "Segoe UI", Arial, sans-serif; margin: 20px auto; max-width: 1100px; background: #fff; color: #333; line-height: 1.6; padding: 10px; }',
+        '    h1 { font-size: 22px; border-bottom: 2px solid #666; padding-bottom: 5px; }',
+        '    h2 { font-size: 18px; border-left: 5px solid #666; padding-left: 10px; margin-top: 30px; background: #f0f0f0; padding: 5px 10px; }',
+        '    h3 { font-size: 15px; border-bottom: 1px dotted #999; margin-top: 20px; }',
+        '    table { border-collapse: collapse; width: 100%; margin: 12px 0; }',
+        '    th, td { border: 1px solid #999; padding: 6px 10px; text-align: left; font-size: 13px; }',
+        '    th { background: #eee; font-weight: bold; }',
+        '    .functional { color: #006; font-weight: bold; }',
+        '    .abstract { color: #666; font-style: italic; }',
+        '    .api-origin { font-size: 11px; color: #555; }',
+        '    .category-badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 11px; font-weight: bold; background: #e8ecf1; color: #333; }',
+        '    .shap-bar-container { display: inline-block; width: 120px; height: 14px; background: #eee; border: 1px solid #ccc; vertical-align: middle; }',
+        '    .shap-bar { height: 100%; background: #336; display: block; }',
+        '    .ratio-container { display: flex; width: 300px; height: 16px; border: 1px solid #999; overflow: hidden; }',
+        '    .bar-main { background: #336; }',
+        '    .bar-api { background: #c63; }',
+        '    .waterfall-img { max-width: 100%; border: 1px solid #ccc; margin: 8px 0; }',
+        '    nav { margin: 10px 0 20px 0; padding: 10px; border: 1px dashed #ccc; background: #fafafa; }',
+        '    nav a { margin-right: 15px; color: #00f; text-decoration: underline; font-size: 13px; }',
+        '    section { margin-bottom: 30px; }',
+        '    .heatmap-cell { text-align: center; font-size: 11px; }',
+        '    .chain-arrow { color: #999; font-weight: bold; }',
+        '    .shared-labels { font-size: 11px; color: #555; }',
         '  </style>',
         '</head>',
         '<body>',
-        f'<h1>SHAP分析レポート — {model_type.upper()} モデル</h1>',
+        f'<h1>SHAP分析レポート -- {model_type.upper()} モデル</h1>',
         '<nav>',
-        '  <a href="#overview">総合カテゴリ重要度</a>',
-        '  <a href="#functional">機能直結キーワード Top</a>',
-        '  <a href="#abstract">除外された抽象キーワード</a>',
-        '  <a href="#api-freq">API頻度 Top</a>',
+        '  <a href="#overview">カテゴリ重要度</a>',
+        '  <a href="#functional">機能直結キーワード</a>',
+        '  <a href="#heatmap">ラベル x MBCヒートマップ</a>',
+        '  <a href="#causal">因果連鎖</a>',
+        '  <a href="#shared">ラベル横断キーワード</a>',
+        '  <a href="#api-freq">API頻度</a>',
         '  <a href="#per-label">ラベル別分析</a>',
         '</nav>',
     ]
     
-    # --- 総合カテゴリ重要度 ---
+    # === 総合カテゴリ重要度 ===
     lines.append('<section id="overview">')
     lines.append('<h2>総合カテゴリ重要度割合（全ラベル平均）</h2>')
     lines.append(f'<p><strong>{main_category_name} Features:</strong> {main_ratio:.1f}% &nbsp; | &nbsp; ')
     lines.append(f'<strong>API Frequency Features:</strong> {api_ratio:.1f}%</p>')
     lines.append(f'<div class="ratio-container">')
-    lines.append(f'  <div class="bar bar-main" style="width: {main_ratio}%;" title="{main_category_name} {main_ratio:.1f}%"></div>')
-    lines.append(f'  <div class="bar bar-api" style="width: {api_ratio}%;" title="API {api_ratio:.1f}%"></div>')
+    lines.append(f'  <div class="bar-main" style="width: {main_ratio}%;" title="{main_category_name} {main_ratio:.1f}%"></div>')
+    lines.append(f'  <div class="bar-api" style="width: {api_ratio}%;" title="API {api_ratio:.1f}%"></div>')
     lines.append(f'</div>')
     lines.append('</section>')
     
-    # --- 機能直結キーワード Top ---
+    # === 機能直結キーワード Top（インラインバーチャート付き）===
     lines.append('<section id="functional">')
-    lines.append('<h2>機能直結キーワード Top（方針B フィルタ後）</h2>')
-    lines.append('<p>マルウェアの動作を直接表すキーワードのみを抽出しています。各キーワードの由来APIも併記しています。</p>')
+    lines.append('<h2>機能直結キーワード Top（インラインバーチャート付き）</h2>')
     lines.append('<table>')
-    lines.append('<tr><th>#</th><th>キーワード</th><th>機能カテゴリ</th><th>平均|SHAP|</th><th>由来API（方針A）</th></tr>')
+    lines.append('<tr><th>#</th><th>キーワード</th><th>MBCカテゴリ</th><th>平均|SHAP|</th><th>重要度</th><th>由来API</th></tr>')
     
-    cat_css = {
-        "File System": "cat-file", "Registry": "cat-registry",
-        "Process/Thread": "cat-process", "Network/Communication": "cat-network",
-        "Memory": "cat-memory", "Cryptography": "cat-crypto",
-        "System Info/Discovery": "cat-security", "Service": "cat-service",
-        "Synchronization": "cat-other", "GUI/Input": "cat-other", "COM": "cat-other"
-    }
+    # バーチャートの最大値
+    max_shap = max((val for _, val, _ in functional_results), default=1.0)
+    if max_shap == 0:
+        max_shap = 1.0
     
     for i, (name, val, cat) in enumerate(functional_results):
-        css_class = cat_css.get(cat, "cat-other")
+        bar_width = val / max_shap * 100
         apis = keyword_to_apis.get(name, [])
         api_str = ", ".join(apis[:5])
         if len(apis) > 5:
@@ -230,17 +256,103 @@ def generate_html_report(output_dir, model_type, main_category_name,
         lines.append(f'<tr>')
         lines.append(f'  <td>{i+1}</td>')
         lines.append(f'  <td class="functional">{name}</td>')
-        lines.append(f'  <td><span class="category-badge {css_class}">{cat}</span></td>')
+        lines.append(f'  <td><span class="category-badge">{cat}</span></td>')
         lines.append(f'  <td>{val:.6f}</td>')
-        lines.append(f'  <td class="api-origin">{api_str if api_str else "—"}</td>')
+        lines.append(f'  <td><span class="shap-bar-container"><span class="shap-bar" style="width:{bar_width:.1f}%"></span></span></td>')
+        lines.append(f'  <td class="api-origin">{api_str if api_str else "---"}</td>')
         lines.append(f'</tr>')
     lines.append('</table>')
     lines.append('</section>')
     
-    # --- 除外された抽象キーワード ---
+    # === ラベル x MBCカテゴリ ヒートマップ ===
+    lines.append('<section id="heatmap">')
+    lines.append('<h2>ラベル x MBCカテゴリ SHAP重要度ヒートマップ</h2>')
+    lines.append('<p>各セルの色の濃さは、そのラベルにおける当該MBCカテゴリの累積SHAP重要度を表す。</p>')
+    lines.append('<table>')
+    # ヘッダー行
+    lines.append('<tr><th>ラベル</th>')
+    for cat in all_mbc_categories:
+        # カテゴリ名が長い場合は短縮
+        short_cat = cat[:12] + ".." if len(cat) > 14 else cat
+        lines.append(f'<th style="font-size:10px;writing-mode:vertical-rl;text-orientation:mixed;height:100px;">{short_cat}</th>')
+    lines.append('</tr>')
+    # データ行
+    for label in sorted(heatmap_data.keys()):
+        cat_sums = heatmap_data[label]
+        lines.append(f'<tr><td style="font-size:12px;white-space:nowrap;">{label}</td>')
+        for cat in all_mbc_categories:
+            v = cat_sums.get(cat, 0.0)
+            if v > 0:
+                intensity = min(v / heatmap_max, 1.0)
+                # 青系のグラデーション: 白(0) → 濃い青(1)
+                r = int(255 * (1 - intensity * 0.8))
+                g = int(255 * (1 - intensity * 0.8))
+                b = int(255 * (1 - intensity * 0.3))
+                lines.append(f'<td class="heatmap-cell" style="background:rgb({r},{g},{b});">{v:.4f}</td>')
+            else:
+                lines.append(f'<td class="heatmap-cell" style="background:#f8f8f8;">-</td>')
+        lines.append('</tr>')
+    lines.append('</table>')
+    lines.append('</section>')
+    
+    # === 因果連鎖テーブル ===
+    lines.append('<section id="causal">')
+    lines.append('<h2>因果連鎖: API → キーワード → MBCカテゴリ → 予測ラベル</h2>')
+    lines.append('<p>SHAP重要度上位のキーワードについて、データの流れ（根拠の追跡可能性）を示す。</p>')
+    lines.append('<table>')
+    lines.append('<tr><th>#</th><th>由来API</th><th></th><th>抽出キーワード</th><th></th><th>MBCカテゴリ</th><th></th><th>寄与ラベル</th><th>|SHAP|</th></tr>')
+    
+    for i, (name, val, cat) in enumerate(functional_results[:15]):
+        apis = keyword_to_apis.get(name, [])
+        api_str = ", ".join(apis[:3])
+        if len(apis) > 3:
+            api_str += f" (+{len(apis)-3})"
+        # このキーワードが寄与しているラベルを検索
+        contributing_labels = []
+        for label, top_kws in per_label_functional_top.items():
+            for kw_name, kw_val, kw_cat in top_kws:
+                if kw_name == name:
+                    contributing_labels.append(label)
+                    break
+        label_str = ", ".join(contributing_labels[:4])
+        if len(contributing_labels) > 4:
+            label_str += f" (+{len(contributing_labels)-4})"
+        
+        lines.append(f'<tr>')
+        lines.append(f'  <td>{i+1}</td>')
+        lines.append(f'  <td class="api-origin">{api_str if api_str else "---"}</td>')
+        lines.append(f'  <td class="chain-arrow">→</td>')
+        lines.append(f'  <td class="functional">{name}</td>')
+        lines.append(f'  <td class="chain-arrow">→</td>')
+        lines.append(f'  <td><span class="category-badge">{cat}</span></td>')
+        lines.append(f'  <td class="chain-arrow">→</td>')
+        lines.append(f'  <td style="font-size:12px;">{label_str}</td>')
+        lines.append(f'  <td>{val:.6f}</td>')
+        lines.append(f'</tr>')
+    lines.append('</table>')
+    lines.append('</section>')
+    
+    # === ラベル横断キーワード ===
+    if shared_keywords:
+        lines.append('<section id="shared">')
+        lines.append('<h2>複数ラベルに共通する重要キーワード</h2>')
+        lines.append('<p>2つ以上のラベルで上位に出現したキーワード。攻撃の複数フェーズに跨る重要な根拠を示す。</p>')
+        lines.append('<table>')
+        lines.append('<tr><th>キーワード</th><th>MBCカテゴリ</th><th>出現ラベル数</th><th>関連ラベル</th><th>累積|SHAP|</th></tr>')
+        for kw_name, info in shared_keywords[:20]:
+            lines.append(f'<tr>')
+            lines.append(f'  <td class="functional">{kw_name}</td>')
+            lines.append(f'  <td><span class="category-badge">{info["category"]}</span></td>')
+            lines.append(f'  <td>{info["count"]}</td>')
+            lines.append(f'  <td class="shared-labels">{", ".join(info["labels"])}</td>')
+            lines.append(f'  <td>{info["total_shap"]:.6f}</td>')
+            lines.append(f'</tr>')
+        lines.append('</table>')
+        lines.append('</section>')
+    
+    # === 除外された抽象キーワード ===
     lines.append('<section id="abstract">')
     lines.append('<h2>除外された抽象キーワード（参考）</h2>')
-    lines.append('<p>機能カテゴリに該当しなかったキーワードです。「life_cycle」「option」「handle」などが含まれます。</p>')
     lines.append('<table>')
     lines.append('<tr><th>#</th><th>キーワード</th><th>平均|SHAP|</th><th>由来API</th></tr>')
     for i, (name, val) in enumerate(abstract_results[:20]):
@@ -252,22 +364,27 @@ def generate_html_report(output_dir, model_type, main_category_name,
     lines.append('</table>')
     lines.append('</section>')
     
-    # --- API頻度 Top ---
+    # === API頻度 Top ===
     lines.append('<section id="api-freq">')
     lines.append('<h2>API頻度 Top 特徴量</h2>')
     lines.append('<table>')
-    lines.append('<tr><th>#</th><th>API名</th><th>平均|SHAP|</th></tr>')
+    lines.append('<tr><th>#</th><th>API名</th><th>平均|SHAP|</th><th>重要度</th></tr>')
+    max_api_shap = max((val for _, val in api_results), default=1.0) if api_results else 1.0
+    if max_api_shap == 0:
+        max_api_shap = 1.0
     for i, (name, val) in enumerate(api_results):
         clean = name.replace("api__", "")
-        lines.append(f'<tr><td>{i+1}</td><td>{clean}</td><td>{val:.6f}</td></tr>')
+        bar_w = val / max_api_shap * 100
+        lines.append(f'<tr><td>{i+1}</td><td>{clean}</td><td>{val:.6f}</td>')
+        lines.append(f'<td><span class="shap-bar-container"><span class="shap-bar" style="width:{bar_w:.1f}%;background:#c63;"></span></span></td></tr>')
     lines.append('</table>')
     lines.append('</section>')
     
-    # --- ラベル別分析 ---
+    # === ラベル別分析 ===
     lines.append('<section id="per-label">')
     lines.append('<h2>ラベル別分析</h2>')
     
-    for label in per_label_category_ratios:
+    for label in sorted(per_label_category_ratios.keys()):
         mr, ar = per_label_category_ratios[label]
         lines.append(f'<h3>{label}</h3>')
         lines.append(f'<p>カテゴリ比率: {main_category_name} {mr:.1f}% / API {ar:.1f}%</p>')
@@ -277,19 +394,24 @@ def generate_html_report(output_dir, model_type, main_category_name,
         if (output_dir / wf_path).exists():
             lines.append(f'<img src="{wf_path}" class="waterfall-img" alt="Waterfall {label}">')
         
-        # Top functional keywords for this label
+        # Top functional keywords for this label（バーチャート付き）
         if label in per_label_functional_top:
             top_kws = per_label_functional_top[label]
             if top_kws:
+                label_max = max((kw_val for _, kw_val, _ in top_kws), default=1.0)
+                if label_max == 0:
+                    label_max = 1.0
                 lines.append('<table>')
-                lines.append('<tr><th>#</th><th>キーワード</th><th>カテゴリ</th><th>|SHAP|</th><th>由来API</th></tr>')
+                lines.append('<tr><th>#</th><th>キーワード</th><th>カテゴリ</th><th>|SHAP|</th><th>重要度</th><th>由来API</th></tr>')
                 for j, (kw_name, kw_val, kw_cat) in enumerate(top_kws[:10]):
-                    css_c = cat_css.get(kw_cat, "cat-other")
                     kw_apis = keyword_to_apis.get(kw_name, [])
                     kw_api_str = ", ".join(kw_apis[:3])
+                    kw_bar_w = kw_val / label_max * 100
                     lines.append(f'<tr><td>{j+1}</td><td class="functional">{kw_name}</td>'
-                                 f'<td><span class="category-badge {css_c}">{kw_cat}</span></td>'
-                                 f'<td>{kw_val:.6f}</td><td class="api-origin">{kw_api_str}</td></tr>')
+                                 f'<td><span class="category-badge">{kw_cat}</span></td>'
+                                 f'<td>{kw_val:.6f}</td>'
+                                 f'<td><span class="shap-bar-container"><span class="shap-bar" style="width:{kw_bar_w:.1f}%"></span></span></td>'
+                                 f'<td class="api-origin">{kw_api_str}</td></tr>')
                 lines.append('</table>')
     
     lines.append('</section>')
