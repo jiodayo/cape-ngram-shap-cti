@@ -102,9 +102,13 @@ def load_data(model_type):
 
     if model_type == "keyword":
         test_features_path = features_dir / "test_keyword_features.csv"
+        test_labels_path = features_dir / "test_labels.csv"
         test_df = pd.read_csv(test_features_path, index_col=0)
+        test_labels_df = pd.read_csv(test_labels_path, index_col=0)
+        
         feature_names = test_df.columns.tolist()
         X_test = test_df.values
+        Y_test = test_labels_df.values
         sample_names = test_df.index.tolist()
         models_dir = Path("logs_keyword/models_br_+freq_rf")
     
@@ -133,7 +137,7 @@ def load_data(model_type):
             feature_names = json.load(f)
         models_dir = Path("logs/models_br_rf")
 
-    return X_test, feature_names, sample_names, label_names, models_dir
+    return X_test, Y_test, feature_names, sample_names, label_names, models_dir
 
 
 def generate_html_report(output_dir, model_type, main_category_name,
@@ -421,7 +425,158 @@ def generate_html_report(output_dir, model_type, main_category_name,
     print(f"HTMLレポートを {html_path} に保存しました。")
 
 
-def analyze_shap(model_type, X_test, feature_names, sample_names, label_names, 
+def generate_sample_html_report(output_dir, model_type, sample_name, sample_analysis_results, keyword_to_apis, all_mbc_categories):
+    """特定の検体にフォーカスしたSHAP分析HTMLレポートを生成する"""
+    html_path = output_dir / f"sample_{sample_name}_report.html"
+    
+    # --- サンプル用 ヒートマップデータ構築 ---
+    heatmap_data = {}
+    heatmap_max = 0.0
+    for label, res in sample_analysis_results.items():
+        cat_sums = defaultdict(float)
+        for kw_name, kw_val, kw_cat in res["top_keywords"]:
+            cat_sums[kw_cat] += kw_val
+            if cat_sums[kw_cat] > heatmap_max:
+                heatmap_max = cat_sums[kw_cat]
+        heatmap_data[label] = cat_sums
+    if heatmap_max == 0:
+        heatmap_max = 1.0
+
+    lines = [
+        '<!DOCTYPE html>',
+        '<html lang="ja">',
+        '<head>',
+        '  <meta charset="utf-8">',
+        f'  <title>検体別SHAP分析 ({sample_name})</title>',
+        '  <style>',
+        '    body { font-family: "MS PGothic", "Segoe UI", Arial, sans-serif; margin: 20px auto; max-width: 1100px; background: #fff; color: #333; line-height: 1.6; padding: 10px; }',
+        '    h1 { font-size: 22px; border-bottom: 2px solid #666; padding-bottom: 5px; }',
+        '    h2 { font-size: 18px; border-left: 5px solid #666; padding-left: 10px; margin-top: 30px; background: #f0f0f0; padding: 5px 10px; }',
+        '    h3 { font-size: 15px; border-bottom: 1px dotted #999; margin-top: 20px; }',
+        '    table { border-collapse: collapse; width: 100%; margin: 12px 0; }',
+        '    th, td { border: 1px solid #999; padding: 6px 10px; text-align: left; font-size: 13px; }',
+        '    th { background: #eee; font-weight: bold; }',
+        '    .functional { color: #006; font-weight: bold; }',
+        '    .api-origin { font-size: 11px; color: #555; }',
+        '    .category-badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 11px; font-weight: bold; background: #e8ecf1; color: #333; }',
+        '    .shap-bar-container { display: inline-block; width: 120px; height: 14px; background: #eee; border: 1px solid #ccc; vertical-align: middle; }',
+        '    .shap-bar { height: 100%; background: #c33; display: block; }',
+        '    .waterfall-img { max-width: 100%; border: 1px solid #ccc; margin: 8px 0; }',
+        '    nav { margin: 10px 0 20px 0; padding: 10px; border: 1px dashed #ccc; background: #fafafa; }',
+        '    nav a { margin-right: 15px; color: #00f; text-decoration: underline; font-size: 13px; }',
+        '    section { margin-bottom: 30px; }',
+        '    .heatmap-cell { text-align: center; font-size: 11px; }',
+        '    .chain-arrow { color: #999; font-weight: bold; }',
+        '    .true-pos { background-color: #d4edda; color: #155724; font-weight: bold; text-align: center; }',
+        '    .true-neg { background-color: #e2e3e5; color: #383d41; text-align: center; }',
+        '    .false-pos { background-color: #f8d7da; color: #721c24; font-weight: bold; text-align: center; }',
+        '    .false-neg { background-color: #fff3cd; color: #856404; font-weight: bold; text-align: center; }',
+        '  </style>',
+        '</head>',
+        '<body>',
+        f'<h1>検体別SHAP分析レポート ({model_type.upper()} モデル)</h1>',
+        f'<p><strong>対象検体:</strong> {sample_name}</p>',
+        '<nav>',
+        '  <a href="#summary">予測 vs 正解 サマリー</a>',
+        '  <a href="#heatmap">ラベル x MBCヒートマップ (当検体)</a>',
+        '  <a href="#details">検出根拠の詳細 (ポジティブラベル)</a>',
+        '</nav>',
+    ]
+    
+    # === 予測 vs 正解 サマリー ===
+    lines.append('<section id="summary">')
+    lines.append('<h2>予測 vs 正解 サマリー</h2>')
+    lines.append('<table>')
+    lines.append('<tr><th>フェーズ (ラベル)</th><th>正解 (Ground Truth)</th><th>予測確率 (Prob)</th><th>判定結果</th></tr>')
+    
+    for label in sorted(sample_analysis_results.keys()):
+        res = sample_analysis_results[label]
+        true_label = res["true_label"]
+        pred_prob = res["pred_prob"]
+        pred_label = 1 if pred_prob >= 0.5 else 0
+        
+        if true_label == 1 and pred_label == 1:
+            decision = '<td class="true-pos">True Positive (正解)</td>'
+        elif true_label == 0 and pred_label == 0:
+            decision = '<td class="true-neg">True Negative (正解)</td>'
+        elif true_label == 0 and pred_label == 1:
+            decision = '<td class="false-pos">False Positive (過剰検知)</td>'
+        else:
+            decision = '<td class="false-neg">False Negative (見逃し)</td>'
+            
+        lines.append(f'<tr><td>{label}</td><td style="text-align:center;">{true_label}</td>')
+        lines.append(f'<td style="text-align:center;">{pred_prob:.4f}</td>{decision}</tr>')
+    lines.append('</table>')
+    lines.append('</section>')
+    
+    # === ヒートマップ ===
+    lines.append('<section id="heatmap">')
+    lines.append('<h2>ラベル x MBCカテゴリ SHAP重要度ヒートマップ (当検体のみ)</h2>')
+    lines.append('<table>')
+    lines.append('<tr><th>ラベル</th>')
+    for cat in all_mbc_categories:
+        short_cat = cat[:12] + ".." if len(cat) > 14 else cat
+        lines.append(f'<th style="font-size:10px;writing-mode:vertical-rl;text-orientation:mixed;height:100px;">{short_cat}</th>')
+    lines.append('</tr>')
+    for label in sorted(heatmap_data.keys()):
+        cat_sums = heatmap_data[label]
+        lines.append(f'<tr><td style="font-size:12px;white-space:nowrap;">{label}</td>')
+        for cat in all_mbc_categories:
+            v = cat_sums.get(cat, 0.0)
+            if v > 0:
+                intensity = min(v / heatmap_max, 1.0)
+                # 赤系のグラデーション (当検体のポジティブな寄与)
+                r = 255
+                g = int(255 * (1 - intensity * 0.8))
+                b = int(255 * (1 - intensity * 0.8))
+                lines.append(f'<td class="heatmap-cell" style="background:rgb({r},{g},{b});">{v:.4f}</td>')
+            else:
+                lines.append(f'<td class="heatmap-cell" style="background:#f8f8f8;">-</td>')
+        lines.append('</tr>')
+    lines.append('</table>')
+    lines.append('</section>')
+    
+    # === 検出根拠の詳細 ===
+    lines.append('<section id="details">')
+    lines.append('<h2>検出根拠の詳細 (正解=1 または 予測=1 のラベル)</h2>')
+    
+    for label in sorted(sample_analysis_results.keys()):
+        res = sample_analysis_results[label]
+        if res["true_label"] == 1 or res["pred_prob"] >= 0.5:
+            lines.append(f'<h3>{label}</h3>')
+            lines.append(f'<p>正解: {res["true_label"]} / 予測: {res["pred_prob"]:.4f}</p>')
+            
+            top_kws = res["top_keywords"]
+            if top_kws:
+                label_max = max((kw_val for _, kw_val, _ in top_kws), default=1.0)
+                if label_max == 0: label_max = 1.0
+                
+                lines.append('<table>')
+                lines.append('<tr><th>#</th><th>キーワード</th><th>MBCカテゴリ</th><th>|SHAP| (当検体)</th><th>重要度</th><th>由来API</th></tr>')
+                for j, (kw_name, kw_val, kw_cat) in enumerate(top_kws):
+                    kw_apis = keyword_to_apis.get(kw_name, [])
+                    kw_api_str = ", ".join(kw_apis[:3])
+                    kw_bar_w = kw_val / label_max * 100
+                    lines.append(f'<tr><td>{j+1}</td><td class="functional">{kw_name}</td>'
+                                 f'<td><span class="category-badge">{kw_cat}</span></td>'
+                                 f'<td>{kw_val:.6f}</td>'
+                                 f'<td><span class="shap-bar-container"><span class="shap-bar" style="width:{kw_bar_w:.1f}%"></span></span></td>'
+                                 f'<td class="api-origin">{kw_api_str}</td></tr>')
+                lines.append('</table>')
+            
+            # Waterfall画像
+            wf_path = f"waterfall_{label}.png"
+            if (output_dir / wf_path).exists():
+                lines.append(f'<img src="{wf_path}" class="waterfall-img" alt="Waterfall {label}">')
+                
+    lines.append('</section>')
+    lines.append('</body></html>')
+    
+    html_path.write_text("\n".join(lines), encoding="utf-8")
+    print(f"検体専用のHTMLレポートを {html_path} に保存しました。")
+
+
+def analyze_shap(model_type, X_test, Y_test, feature_names, sample_names, label_names, 
                  models_dir, sample_index, top_n, keyword_to_apis):
     output_dir = Path(f"logs_shap_analysis/{model_type}")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -444,12 +599,16 @@ def analyze_shap(model_type, X_test, feature_names, sample_names, label_names,
     
     sample_vector = X_test[sample_index].reshape(1, -1)
     sample_name = sample_names[sample_index]
+    print(f"\n対象検体 (sample_index={sample_index}): {sample_name}")
     
     # ラベル別の結果を記録
     per_label_category_ratios = {}
     per_label_functional_top = {}
     
-    for label in tqdm(label_names, desc="各ラベルのSHAPを計算中"):
+    # 当該サンプルの分析結果
+    sample_analysis_results = {}
+    
+    for label_idx, label in enumerate(tqdm(label_names, desc="各ラベルのSHAPを計算中")):
         model_path = models_dir / f"{label}.joblib"
         if not model_path.exists():
             print(f"モデルが見つかりません: {model_path} (スキップ)")
@@ -489,7 +648,7 @@ def analyze_shap(model_type, X_test, feature_names, sample_names, label_names,
         else:
             per_label_category_ratios[label] = (0, 0)
         
-        # ラベル別: 機能直結キーワードのTop
+        # ラベル別: 機能直結キーワードのTop (全体平均)
         label_functional = []
         for i in main_indices:
             cat = classify_keyword(feature_names[i])
@@ -498,7 +657,7 @@ def analyze_shap(model_type, X_test, feature_names, sample_names, label_names,
         label_functional.sort(key=lambda x: x[1], reverse=True)
         per_label_functional_top[label] = label_functional[:10]
         
-        # Waterfallプロット
+        # Waterfallプロット (特定検体)
         shap_values_sample = explainer(sample_vector)
         if len(shap_values_sample.shape) == 3:
             shap_val = shap_values_sample[:, :, 1]
@@ -512,6 +671,29 @@ def analyze_shap(model_type, X_test, feature_names, sample_names, label_names,
         plt.tight_layout()
         plt.savefig(output_dir / f"waterfall_{label}.png", dpi=150)
         plt.close()
+        
+        # ===== サンプル専用の予測と根拠の記録 =====
+        true_label = int(Y_test[sample_index, label_idx])
+        if hasattr(model, "predict_proba"):
+            pred_prob = model.predict_proba(sample_vector)[0, 1]
+        else:
+            pred_prob = float(model.predict(sample_vector)[0])
+            
+        sample_label_functional = []
+        s_vals = shap_val[0].values
+        for i in main_indices:
+            cat = classify_keyword(feature_names[i])
+            if cat:
+                v = s_vals[i]
+                if v > 0:  # 予測を正の方向に押し上げているキーワードのみ
+                    sample_label_functional.append((feature_names[i], v, cat))
+        sample_label_functional.sort(key=lambda x: x[1], reverse=True)
+        
+        sample_analysis_results[label] = {
+            "true_label": true_label,
+            "pred_prob": pred_prob,
+            "top_keywords": sample_label_functional[:15]
+        }
         
     # === 全ラベルの総合レポート ===
     total_importance = overall_importances["main_sum"] + overall_importances["api_sum"]
@@ -541,6 +723,13 @@ def analyze_shap(model_type, X_test, feature_names, sample_names, label_names,
     
     api_results = [(feature_names[i], avg_fi[i]) for i in api_indices]
     api_results.sort(key=lambda x: x[1], reverse=True)
+    
+    # --- 全ラベルで登場するMBCカテゴリの一覧を収集 ---
+    all_mbc_categories = set()
+    for label, top_kws in per_label_functional_top.items():
+        for kw_name, kw_val, kw_cat in top_kws:
+            all_mbc_categories.add(kw_cat)
+    all_mbc_categories = sorted(all_mbc_categories)
     
     # --- コンソール出力 ---
     print("\n" + "=" * 60)
@@ -608,6 +797,13 @@ def analyze_shap(model_type, X_test, feature_names, sample_names, label_names,
         per_label_functional_top
     )
     
+    # --- 検体専用HTMLレポート ---
+    generate_sample_html_report(
+        output_dir, model_type, sample_name,
+        sample_analysis_results, keyword_to_apis,
+        all_mbc_categories
+    )
+    
     # --- 構造化JSONレポート（Evidence Report用） ---
     structured_results = {
         "model_type": model_type,
@@ -651,6 +847,7 @@ def analyze_shap(model_type, X_test, feature_names, sample_names, label_names,
     print(f"\n結果を {output_dir} に保存しました。")
     print(f"  - overall_report.txt             (テキストレポート)")
     print(f"  - shap_report.html               (学会向けHTMLレポート)")
+    print(f"  - sample_{sample_name}_report.html (検体別レポート)")
     print(f"  - shap_structured_results.json   (構造化データ)")
     print(f"  - waterfall_*.png                (各ラベルのWaterfall)")
 
@@ -662,11 +859,11 @@ if __name__ == "__main__":
     load_mbc_mapping()
     
     print("データの読み込み中...")
-    X_test, feature_names, sample_names, label_names, models_dir = load_data(args.model_type)
+    X_test, Y_test, feature_names, sample_names, label_names, models_dir = load_data(args.model_type)
     
     print("API出自逆引き辞書を構築中...")
     keyword_to_apis = build_keyword_to_apis(args.api_keywords_path)
     
     print(f"\nSHAP分析の実行 ({args.model_type}モデル)...")
-    analyze_shap(args.model_type, X_test, feature_names, sample_names, label_names,
+    analyze_shap(args.model_type, X_test, Y_test, feature_names, sample_names, label_names,
                  models_dir, args.sample_index, args.top_n, keyword_to_apis)
