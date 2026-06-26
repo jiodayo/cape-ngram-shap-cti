@@ -65,24 +65,27 @@ def build_mapping(input_filepath, output_filepath):
     # 閾値を超えたキーワード数を数える
     above_threshold_count = int(np.sum(max_similarities >= dynamic_threshold))
     
-    # 期待値の算出: もし均等に分配されたら各カテゴリに何個入るか
-    expected_per_category = above_threshold_count / len(mbc_categories)
-    # 期待値以上の集積があるカテゴリのみ採用（最低1）
-    min_keywords = max(1, int(np.ceil(expected_per_category)))
-    print(f"[データドリブン選定] 閾値超えキーワード数: {above_threshold_count}, カテゴリ数: {len(mbc_categories)}")
-    print(f"[データドリブン選定] 期待値 = {expected_per_category:.2f} → 最小キーワード数(min_keywords) = {min_keywords}")
-    
-    print(f"\n各カテゴリに閾値以上のキーワードが {min_keywords} 個以上あるか検証中...")
-    category_counts = {}
+    # まず各キーワードの暫定的なベストカテゴリを集計
+    preliminary_counts = {}
     for i, kw in enumerate(unique_keywords):
         best_idx = np.argmax(similarities[i])
         best_score = similarities[i][best_idx]
         if best_score >= dynamic_threshold:
             cat = mbc_categories[best_idx]
-            category_counts[cat] = category_counts.get(cat, 0) + 1
+            preliminary_counts[cat] = preliminary_counts.get(cat, 0) + 1
+    
+    # 期待値の算出: 実際にキーワードが割り当てられたカテゴリ数を母数とする
+    active_categories = len(preliminary_counts)
+    expected_per_category = above_threshold_count / active_categories if active_categories > 0 else 1
+    # 期待値以上の集積があるカテゴリのみ採用（最低2: 複数の独立した根拠を要求）
+    min_keywords = max(2, int(np.ceil(expected_per_category)))
+    print(f"[データドリブン選定] 閾値超えキーワード数: {above_threshold_count}, 割当先カテゴリ数: {active_categories}")
+    print(f"[データドリブン選定] 期待値 = {expected_per_category:.2f} → 最小キーワード数(min_keywords) = {min_keywords}")
+    
+    print(f"\n各カテゴリに閾値以上のキーワードが {min_keywords} 個以上あるか検証中...")
 
     # 有効なカテゴリ（採用されたカテゴリ）を抽出
-    adopted_categories = {cat for cat, count in category_counts.items() if count >= min_keywords}
+    adopted_categories = {cat for cat, count in preliminary_counts.items() if count >= min_keywords}
     print(f"{len(mbc_categories)} 個の候補のうち、データによって客観的に {len(adopted_categories)} 個のカテゴリが自動採用されました。")
 
     # --- 最終マッピング ---
