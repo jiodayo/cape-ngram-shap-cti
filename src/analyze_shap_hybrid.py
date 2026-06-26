@@ -49,8 +49,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description="ハイブリッドモデルのカテゴリ別SHAP分析 (API出自 + 機能フィルタ付き)")
     parser.add_argument("--model-type", type=str, choices=["keyword", "pca"], required=True,
                         help="分析対象のモデル（keyword または pca）")
-    parser.add_argument("--sample-index", type=int, default=0,
-                        help="Waterfallプロットを出力するテストデータのインデックス (default: 0)")
+    parser.add_argument("--sample-indices", type=str, default="0,1,2",
+                        help="Waterfallプロットを出力するテストデータのインデックス(カンマ区切り) (default: 0,1,2)")
     parser.add_argument("--top-n", type=int, default=20,
                         help="各カテゴリで表示する上位特徴量の数 (default: 20)")
     parser.add_argument("--api-keywords-path", type=str, default="api_keywords_single.json",
@@ -460,7 +460,8 @@ def generate_sample_html_report(output_dir, model_type, sample_name, sample_anal
         '    .api-origin { font-size: 11px; color: #555; }',
         '    .category-badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 11px; font-weight: bold; background: #e8ecf1; color: #333; }',
         '    .shap-bar-container { display: inline-block; width: 120px; height: 14px; background: #eee; border: 1px solid #ccc; vertical-align: middle; }',
-        '    .shap-bar { height: 100%; background: #c33; display: block; }',
+        '    .shap-bar-pos { height: 100%; background: #c33; display: block; }',
+        '    .shap-bar-neg { height: 100%; background: #33c; display: block; }',
         '    .waterfall-img { max-width: 100%; border: 1px solid #ccc; margin: 8px 0; }',
         '    nav { margin: 10px 0 20px 0; padding: 10px; border: 1px dashed #ccc; background: #fafafa; }',
         '    nav a { margin-right: 15px; color: #00f; text-decoration: underline; font-size: 13px; }',
@@ -479,7 +480,7 @@ def generate_sample_html_report(output_dir, model_type, sample_name, sample_anal
         '<nav>',
         '  <a href="#summary">予測 vs 正解 サマリー</a>',
         '  <a href="#heatmap">ラベル x MBCヒートマップ (当検体)</a>',
-        '  <a href="#details">検出根拠の詳細 (ポジティブラベル)</a>',
+        '  <a href="#details">検出根拠の詳細 (全ラベル)</a>',
         '</nav>',
     ]
     
@@ -538,36 +539,37 @@ def generate_sample_html_report(output_dir, model_type, sample_name, sample_anal
     
     # === 検出根拠の詳細 ===
     lines.append('<section id="details">')
-    lines.append('<h2>検出根拠の詳細 (正解=1 または 予測=1 のラベル)</h2>')
+    lines.append('<h2>検出根拠の詳細 (全ラベル)</h2>')
     
     for label in sorted(sample_analysis_results.keys()):
         res = sample_analysis_results[label]
-        if res["true_label"] == 1 or res["pred_prob"] >= 0.5:
-            lines.append(f'<h3>{label}</h3>')
-            lines.append(f'<p>正解: {res["true_label"]} / 予測: {res["pred_prob"]:.4f}</p>')
+        
+        lines.append(f'<h3>{label}</h3>')
+        lines.append(f'<p>正解: {res["true_label"]} / 予測: {res["pred_prob"]:.4f}</p>')
+        
+        top_kws = res["top_keywords"]
+        if top_kws:
+            label_max = max((abs(kw_val) for _, kw_val, _ in top_kws), default=1.0)
+            if label_max == 0: label_max = 1.0
             
-            top_kws = res["top_keywords"]
-            if top_kws:
-                label_max = max((kw_val for _, kw_val, _ in top_kws), default=1.0)
-                if label_max == 0: label_max = 1.0
-                
-                lines.append('<table>')
-                lines.append('<tr><th>#</th><th>キーワード</th><th>MBCカテゴリ</th><th>|SHAP| (当検体)</th><th>重要度</th><th>由来API</th></tr>')
-                for j, (kw_name, kw_val, kw_cat) in enumerate(top_kws):
-                    kw_apis = keyword_to_apis.get(kw_name, [])
-                    kw_api_str = ", ".join(kw_apis[:3])
-                    kw_bar_w = kw_val / label_max * 100
-                    lines.append(f'<tr><td>{j+1}</td><td class="functional">{kw_name}</td>'
-                                 f'<td><span class="category-badge">{kw_cat}</span></td>'
-                                 f'<td>{kw_val:.6f}</td>'
-                                 f'<td><span class="shap-bar-container"><span class="shap-bar" style="width:{kw_bar_w:.1f}%"></span></span></td>'
-                                 f'<td class="api-origin">{kw_api_str}</td></tr>')
-                lines.append('</table>')
-            
-            # Waterfall画像
-            wf_path = f"waterfall_{label}.png"
-            if (output_dir / wf_path).exists():
-                lines.append(f'<img src="{wf_path}" class="waterfall-img" alt="Waterfall {label}">')
+            lines.append('<table>')
+            lines.append('<tr><th>#</th><th>キーワード</th><th>MBCカテゴリ</th><th>SHAP (当検体)</th><th>重要度</th><th>由来API</th></tr>')
+            for j, (kw_name, kw_val, kw_cat) in enumerate(top_kws):
+                kw_apis = keyword_to_apis.get(kw_name, [])
+                kw_api_str = ", ".join(kw_apis[:3])
+                kw_bar_w = abs(kw_val) / label_max * 100
+                bar_class = "shap-bar-pos" if kw_val > 0 else "shap-bar-neg"
+                lines.append(f'<tr><td>{j+1}</td><td class="functional">{kw_name}</td>'
+                             f'<td><span class="category-badge">{kw_cat}</span></td>'
+                             f'<td>{kw_val:.6f}</td>'
+                             f'<td><span class="shap-bar-container"><span class="{bar_class}" style="width:{kw_bar_w:.1f}%"></span></span></td>'
+                             f'<td class="api-origin">{kw_api_str}</td></tr>')
+            lines.append('</table>')
+        
+        # Waterfall画像
+        wf_path = f"waterfall_{label}_{sample_name}.png"
+        if (output_dir / wf_path).exists():
+            lines.append(f'<img src="{wf_path}" class="waterfall-img" alt="Waterfall {label}">')
                 
     lines.append('</section>')
     lines.append('</body></html>')
@@ -577,7 +579,7 @@ def generate_sample_html_report(output_dir, model_type, sample_name, sample_anal
 
 
 def analyze_shap(model_type, X_test, Y_test, feature_names, sample_names, label_names, 
-                 models_dir, sample_index, top_n, keyword_to_apis):
+                 models_dir, sample_indices, top_n, keyword_to_apis):
     output_dir = Path(f"logs_shap_analysis/{model_type}")
     output_dir.mkdir(parents=True, exist_ok=True)
     
@@ -597,16 +599,10 @@ def analyze_shap(model_type, X_test, Y_test, feature_names, sample_names, label_
         "feature_importances": np.zeros(len(feature_names))
     }
     
-    sample_vector = X_test[sample_index].reshape(1, -1)
-    sample_name = sample_names[sample_index]
-    print(f"\n対象検体 (sample_index={sample_index}): {sample_name}")
-    
-    # ラベル別の結果を記録
-    per_label_category_ratios = {}
-    per_label_functional_top = {}
-    
     # 当該サンプルの分析結果
-    sample_analysis_results = {}
+    samples_analysis_results = {idx: {} for idx in sample_indices}
+    for s_idx in sample_indices:
+        print(f"\n対象検体 (sample_index={s_idx}): {sample_names[s_idx]}")
     
     for label_idx, label in enumerate(tqdm(label_names, desc="各ラベルのSHAPを計算中")):
         model_path = models_dir / f"{label}.joblib"
@@ -658,42 +654,46 @@ def analyze_shap(model_type, X_test, Y_test, feature_names, sample_names, label_
         per_label_functional_top[label] = label_functional[:10]
         
         # Waterfallプロット (特定検体)
-        shap_values_sample = explainer(sample_vector)
-        if len(shap_values_sample.shape) == 3:
-            shap_val = shap_values_sample[:, :, 1]
-        else:
-            shap_val = shap_values_sample
-        shap_val.feature_names = feature_names
-        
-        plt.figure(figsize=(10, 8))
-        shap.plots.waterfall(shap_val[0], max_display=20, show=False)
-        plt.title(f"Waterfall — {label} (sample: {sample_name})", fontsize=12)
-        plt.tight_layout()
-        plt.savefig(output_dir / f"waterfall_{label}.png", dpi=150)
-        plt.close()
-        
-        # ===== サンプル専用の予測と根拠の記録 =====
-        true_label = int(Y_test[sample_index, label_idx])
-        if hasattr(model, "predict_proba"):
-            pred_prob = model.predict_proba(sample_vector)[0, 1]
-        else:
-            pred_prob = float(model.predict(sample_vector)[0])
+        for s_idx in sample_indices:
+            sample_vector = X_test[s_idx].reshape(1, -1)
+            sample_name = sample_names[s_idx]
             
-        sample_label_functional = []
-        s_vals = shap_val[0].values
-        for i in main_indices:
-            cat = classify_keyword(feature_names[i])
-            if cat:
-                v = s_vals[i]
-                if v > 0:  # 予測を正の方向に押し上げているキーワードのみ
-                    sample_label_functional.append((feature_names[i], v, cat))
-        sample_label_functional.sort(key=lambda x: x[1], reverse=True)
-        
-        sample_analysis_results[label] = {
-            "true_label": true_label,
-            "pred_prob": pred_prob,
-            "top_keywords": sample_label_functional[:15]
-        }
+            shap_values_sample = explainer(sample_vector)
+            if len(shap_values_sample.shape) == 3:
+                shap_val = shap_values_sample[:, :, 1]
+            else:
+                shap_val = shap_values_sample
+            shap_val.feature_names = feature_names
+            
+            plt.figure(figsize=(10, 8))
+            shap.plots.waterfall(shap_val[0], max_display=20, show=False)
+            plt.title(f"Waterfall — {label} (sample: {sample_name})", fontsize=12)
+            plt.tight_layout()
+            plt.savefig(output_dir / f"waterfall_{label}_{sample_name}.png", dpi=150)
+            plt.close()
+            
+            # ===== サンプル専用の予測と根拠の記録 =====
+            true_label = int(Y_test[s_idx, label_idx])
+            if hasattr(model, "predict_proba"):
+                pred_prob = model.predict_proba(sample_vector)[0, 1]
+            else:
+                pred_prob = float(model.predict(sample_vector)[0])
+                
+            sample_label_functional = []
+            s_vals = shap_val[0].values
+            for i in main_indices:
+                cat = classify_keyword(feature_names[i])
+                if cat:
+                    v = s_vals[i]
+                    if abs(v) > 0:  # 全ての寄与を記録
+                        sample_label_functional.append((feature_names[i], v, cat))
+            sample_label_functional.sort(key=lambda x: abs(x[1]), reverse=True)
+            
+            samples_analysis_results[s_idx][label] = {
+                "true_label": true_label,
+                "pred_prob": pred_prob,
+                "top_keywords": sample_label_functional[:15]
+            }
         
     # === 全ラベルの総合レポート ===
     total_importance = overall_importances["main_sum"] + overall_importances["api_sum"]
@@ -798,11 +798,12 @@ def analyze_shap(model_type, X_test, Y_test, feature_names, sample_names, label_
     )
     
     # --- 検体専用HTMLレポート ---
-    generate_sample_html_report(
-        output_dir, model_type, sample_name,
-        sample_analysis_results, keyword_to_apis,
-        all_mbc_categories
-    )
+    for s_idx in sample_indices:
+        generate_sample_html_report(
+            output_dir, model_type, sample_names[s_idx],
+            samples_analysis_results[s_idx], keyword_to_apis,
+            all_mbc_categories
+        )
     
     # --- 構造化JSONレポート（Evidence Report用） ---
     structured_results = {
@@ -847,7 +848,7 @@ def analyze_shap(model_type, X_test, Y_test, feature_names, sample_names, label_
     print(f"\n結果を {output_dir} に保存しました。")
     print(f"  - overall_report.txt             (テキストレポート)")
     print(f"  - shap_report.html               (学会向けHTMLレポート)")
-    print(f"  - sample_{sample_name}_report.html (検体別レポート)")
+    print(f"  - sample_*_report.html           (検体別レポート)")
     print(f"  - shap_structured_results.json   (構造化データ)")
     print(f"  - waterfall_*.png                (各ラベルのWaterfall)")
 
@@ -864,6 +865,8 @@ if __name__ == "__main__":
     print("API出自逆引き辞書を構築中...")
     keyword_to_apis = build_keyword_to_apis(args.api_keywords_path)
     
+    sample_indices = [int(x.strip()) for x in args.sample_indices.split(",")]
+    
     print(f"\nSHAP分析の実行 ({args.model_type}モデル)...")
     analyze_shap(args.model_type, X_test, Y_test, feature_names, sample_names, label_names,
-                 models_dir, args.sample_index, args.top_n, keyword_to_apis)
+                 models_dir, sample_indices, args.top_n, keyword_to_apis)
