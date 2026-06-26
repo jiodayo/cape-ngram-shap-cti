@@ -127,7 +127,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="キーワードをMBC Micro-Behaviorsにマッピングする。")
     parser.add_argument("--input", type=str, default="api_keywords_single.json", help="入力となるキーワードJSONファイル")
     parser.add_argument("--output", type=str, default="features/mbc_keyword_mapping.json", help="出力するマッピング結果JSONファイル")
-    parser.add_argument("--threshold", type=float, default=0.25, help="カテゴリに割り当てる最小コサイン類似度（閾値）")
+    parser.add_argument("--min-keywords", type=int, default=5, help="採用されるために必要な最小キーワード数")
     args = parser.parse_args()
 
-    build_mapping(args.input, args.output, threshold=args.threshold)
+    build_mapping(args.input, args.output, min_keywords=args.min_keywords)
