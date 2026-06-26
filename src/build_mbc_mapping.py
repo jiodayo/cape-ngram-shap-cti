@@ -9,25 +9,21 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 
-# MBC Micro-Behaviors の定義 (公式の定義をベースにシンプル化)
-MBC_MICRO_BEHAVIORS = {
-    "File System": "Behaviors related to creating, reading, writing, deleting, or modifying files, directories, paths, and attributes.",
-    "Process/Thread": "Behaviors related to executing, injecting, terminating, or managing processes, threads, and modules.",
-    "Registry": "Behaviors related to reading, writing, modifying, or deleting the Windows Registry keys and values.",
-    "Network/Communication": "Behaviors related to establishing connections, sending or receiving data, sockets, and internet over the network.",
-    "Cryptography": "Behaviors related to encrypting, decrypting, hashing data, keys, and certificates.",
-    "Memory": "Behaviors related to allocating, freeing, protecting, or reading system virtual memory and heaps.",
-    "Service": "Behaviors related to creating, starting, or managing Windows services, drivers, and control managers.",
-    "System Info/Discovery": "Behaviors related to gathering information about the system environment, hardware, configuration, and time.",
-    "Synchronization": "Behaviors related to mutexes, semaphores, events, and process synchronization.",
-    "GUI/Input": "Behaviors related to the graphical user interface, windows, mouse, or capturing user input like keystrokes.",
-    "COM": "Behaviors related to Component Object Model (COM) initialization, classes, and object instantiation."
-}
-
-def build_mapping(input_filepath, output_filepath, threshold=0.25):
+def build_mapping(input_filepath, output_filepath, min_keywords=5):
     if not os.path.exists(input_filepath):
         print(f"エラー: 入力ファイル '{input_filepath}' が見つかりません。")
         return
+
+    # MBCの全612カテゴリ辞書をロード
+    mbc_json_path = os.path.join(os.path.dirname(__file__), 'mbc_full_categories.json')
+    if not os.path.exists(mbc_json_path):
+        print(f"エラー: MBCカテゴリファイル '{mbc_json_path}' が見つかりません。事前に extract_mbc_catalog.py を実行してください。")
+        return
+        
+    with open(mbc_json_path, 'r', encoding='utf-8') as f:
+        mbc_micro_behaviors = json.load(f)
+        
+    print(f"MBC公式から抽出された {len(mbc_micro_behaviors)} 個の全カテゴリを候補としてロードしました。")
 
     print(f"'{input_filepath}' から抽出されたキーワードを読み込んでいます...")
     with open(input_filepath, 'r', encoding='utf-8') as f:
@@ -45,32 +41,67 @@ def build_mapping(input_filepath, output_filepath, threshold=0.25):
     model = SentenceTransformer('all-MiniLM-L6-v2')
 
     # MBCカテゴリの埋め込みを計算
-    print("MBCカテゴリのベクトルを計算中...")
-    mbc_categories = list(MBC_MICRO_BEHAVIORS.keys())
-    mbc_descriptions = list(MBC_MICRO_BEHAVIORS.values())
+    print("MBC全カテゴリのベクトルを計算中...")
+    mbc_categories = list(mbc_micro_behaviors.keys())
+    mbc_descriptions = list(mbc_micro_behaviors.values())
     mbc_embeddings = model.encode(mbc_descriptions)
 
     # キーワードの埋め込みを計算
     print("キーワードのベクトルを計算中...")
     keyword_embeddings = model.encode(unique_keywords)
 
-    print("Zero-shot分類（コサイン類似度計算）を実行中...")
+    print("総当たりZero-shot分類（コサイン類似度計算）を実行中...")
     similarities = cosine_similarity(keyword_embeddings, mbc_embeddings)
 
-    mapping_result = {}
+    # --- データドリブンな閾値の算出 ---
+    # 各キーワードの「一番高い類似度スコア」を抽出
+    max_similarities = np.max(similarities, axis=1)
+    
+    # 上位25%（75パーセンタイル）を動的閾値として設定
+    dynamic_threshold = np.percentile(max_similarities, 75)
+    print(f"\n[データドリブン選定] スコア分布の75パーセンタイルから動的閾値を算出: {dynamic_threshold:.4f}")
+
+    # --- カテゴリの自動フィルタリング ---
+    print(f"\n各カテゴリに閾値以上のキーワードが {min_keywords} 個以上あるか検証中...")
+    category_counts = {}
     for i, kw in enumerate(unique_keywords):
         best_idx = np.argmax(similarities[i])
         best_score = similarities[i][best_idx]
+        if best_score >= dynamic_threshold:
+            cat = mbc_categories[best_idx]
+            category_counts[cat] = category_counts.get(cat, 0) + 1
 
-        if best_score >= threshold:
-            category = mbc_categories[best_idx]
+    # 有効なカテゴリ（採用されたカテゴリ）を抽出
+    adopted_categories = {cat for cat, count in category_counts.items() if count >= min_keywords}
+    print(f"{len(mbc_categories)} 個の候補のうち、データによって客観的に {len(adopted_categories)} 個のカテゴリが自動採用されました。")
+
+    # --- 最終マッピング ---
+    mapping_result = {}
+    noise_count = 0
+    for i, kw in enumerate(unique_keywords):
+        best_cat = None
+        best_score = -1.0
+        
+        # 採用されたカテゴリの中だけで一番高い類似度を探す
+        for j, cat in enumerate(mbc_categories):
+            if cat in adopted_categories:
+                score = similarities[i][j]
+                if score > best_score:
+                    best_score = score
+                    best_cat = cat
+                    
+        # 最終的に採用カテゴリ内でのベストスコアが閾値を超えていれば紐付け
+        if best_cat and best_score >= dynamic_threshold:
+            mapping_result[kw] = {
+                "category": best_cat,
+                "similarity_score": float(best_score)
+            }
         else:
-            category = "Uncategorized (Noise)"
-
-        mapping_result[kw] = {
-            "category": category,
-            "similarity_score": float(best_score)
-        }
+            noise_count += 1
+            mapping_result[kw] = {
+                "category": "Uncategorized (Noise)",
+                "similarity_score": float(best_score if best_score != -1.0 else 0.0)
+            }
 
     # 保存
     os.makedirs(os.path.dirname(output_filepath) if os.path.dirname(output_filepath) else '.', exist_ok=True)
@@ -78,14 +109,17 @@ def build_mapping(input_filepath, output_filepath, threshold=0.25):
         json.dump(mapping_result, f, indent=4, ensure_ascii=False)
 
     print(f"\nマッピングが完了しました！結果を '{output_filepath}' に保存しました。")
+    print(f" - 有効マッピング数: {len(unique_keywords) - noise_count}")
+    print(f" - 除外（ノイズ）数: {noise_count}")
     
     # 簡単な統計を表示
     stats = {}
     for res in mapping_result.values():
         c = res['category']
-        stats[c] = stats.get(c, 0) + 1
+        if c != "Uncategorized (Noise)":
+            stats[c] = stats.get(c, 0) + 1
     
-    print("\n【カテゴライズ結果の統計】")
+    print("\n【採用されたカテゴリごとのキーワード数】")
     for c, count in sorted(stats.items(), key=lambda x: x[1], reverse=True):
         print(f"  - {c}: {count} 個")
 
