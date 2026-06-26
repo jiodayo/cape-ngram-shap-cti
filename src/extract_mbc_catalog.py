@@ -10,11 +10,16 @@ def main():
         for obj in data.get("objects", []):
             if obj.get("type") in ["malware-behavior", "malware-objective", "malware-method"]:
                 name = obj.get("name", "")
-                desc = obj.get("description", obj.get("obj_defn", ""))
+                raw_desc = obj.get("description", obj.get("obj_defn", ""))
                 
-                # Some descriptions can be very long, maybe truncate or keep full for sentence-bert
+                # obj_defnが辞書型の場合、中のdescriptionキーからテキストを取り出す
+                if isinstance(raw_desc, dict):
+                    desc = raw_desc.get("description", "")
+                else:
+                    desc = raw_desc
+                
                 # Sentence-BERT can handle up to 256/512 tokens. Keeping full is fine.
-                if name and desc:
+                if name and desc and isinstance(desc, str):
                     behaviors[name] = desc
         
         print(f"Extracted {len(behaviors)} MBC behaviors.")
