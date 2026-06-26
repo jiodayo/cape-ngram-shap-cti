@@ -599,6 +599,10 @@ def analyze_shap(model_type, X_test, Y_test, feature_names, sample_names, label_
         "feature_importances": np.zeros(len(feature_names))
     }
     
+    # ラベル別の結果を記録
+    per_label_category_ratios = {}
+    per_label_functional_top = {}
+    
     # 当該サンプルの分析結果
     samples_analysis_results = {idx: {} for idx in sample_indices}
     for s_idx in sample_indices:
