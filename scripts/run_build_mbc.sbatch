@@ -1,17 +1,15 @@
 #!/bin/bash
-#SBATCH --job-name=build_mbc
-#SBATCH --output=joblog/build_mbc_%j.out
-#SBATCH --error=joblog/build_mbc_%j.err
-#SBATCH --cpus-per-task=4
-#SBATCH --mem=16000M
-#SBATCH --time=02:00:00
+#SBATCH -J build_mbc
+#SBATCH -p GPU801
+#SBATCH -D /home/i055ueno/k_data/reserch
+#SBATCH -o joblog/%x_%j.log
+#SBATCH -e joblog/%x_%j.err
+#SBATCH --time=1-00:00:00
+#SBATCH --mem=200G
 
 set -euo pipefail
-
-# プロジェクトルートへ移動（環境に合わせて修正してください）
-cd /home/i055ueno/k_data/reserch
-
-# ログディレクトリの作成
+ROOT_DIR="/home/i055ueno/k_data/reserch"
+cd "$ROOT_DIR"
 mkdir -p joblog
 
 # 仮想環境のPythonを使う場合
